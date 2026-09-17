@@ -701,6 +701,36 @@ def test_build_input_materializes_sliced_csv_workload(load_tool: Callable[..., M
     ]
 
 
+def test_build_input_materializes_sliced_jsonl_workload(load_tool: Callable[..., ModuleType], tmp_path: Path) -> None:
+    tool = load_tool("measurement_benchmark_tool_sliced_jsonl", REPO_ROOT / "tools/measurement/run_benchmarks.py")
+    input_path = tmp_path / "input.jsonl"
+    pd.DataFrame({"id": ["a", "b", "c", "d"], "text": ["row-a", "row-b", "row-c", "row-d"]}).to_json(
+        input_path, orient="records", lines=True
+    )
+    workload = tool.WorkloadSpec(
+        id="slice",
+        source="input.jsonl",
+        text_column="text",
+        id_column="id",
+        row_offset=1,
+        row_limit=2,
+    )
+
+    anonymizer_input = tool.build_input(
+        workload,
+        tmp_path,
+        slice_dir=tmp_path / "slices",
+        case_id="slice__redact__r000",
+    )
+
+    assert Path(anonymizer_input.source).suffix == ".jsonl"
+    sliced = pd.read_json(anonymizer_input.source, lines=True)
+    assert sliced.to_dict("records") == [
+        {"id": "b", "text": "row-b"},
+        {"id": "c", "text": "row-c"},
+    ]
+
+
 def test_benchmark_preflight_rejects_sliced_remote_workload(
     load_tool: Callable[..., ModuleType], tmp_path: Path
 ) -> None:

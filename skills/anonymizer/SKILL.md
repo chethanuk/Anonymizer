@@ -167,7 +167,8 @@ def main() -> None:
 
     if args.full:
         result = anonymizer.run(config=config, data=data)
-        out_path = "output.parquet"  # TODO: change path/format (.csv, .jsonl) as needed
+        out_path = "output.parquet"  # TODO: change the path as needed; for .csv / .json / .jsonl
+        # swap to_parquet below for to_csv / to_json (to_json needs lines=True for .jsonl)
         result.dataframe.to_parquet(out_path)
         print(f"Wrote {len(result.dataframe)} rows to {out_path}")
     else:

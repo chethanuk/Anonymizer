@@ -47,7 +47,7 @@ class AnonymizerInput(BaseModel):
     Format is inferred from the file extension of a local path or HTTP(S) URL.
     """
 
-    source: str = Field(description="Local path or HTTP(S) URL for a .csv or .parquet input file.")
+    source: str = Field(description="Local path or HTTP(S) URL for a .csv, .parquet, .json or .jsonl input file.")
     text_column: str = Field(default="text", min_length=1, description="Column containing the text to anonymize.")
     id_column: str | None = Field(default=None, description="Optional column to use as record identifier.")
     data_summary: str | None = Field(

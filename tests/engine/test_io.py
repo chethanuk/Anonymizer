@@ -19,6 +19,8 @@ from anonymizer.interface.errors import AnonymizerIOError, InvalidInputError
 _WRITERS = {
     ".csv": lambda df, p: df.to_csv(p, index=False),
     ".parquet": lambda df, p: df.to_parquet(p, index=False),
+    ".json": lambda df, p: df.to_json(p, orient="records"),
+    ".jsonl": lambda df, p: df.to_json(p, orient="records", lines=True),
 }
 
 
@@ -48,6 +50,26 @@ def test_write_output_parquet_roundtrips(stub_dataframe: pd.DataFrame, tmp_path:
     assert loaded[COL_TEXT].tolist() == stub_dataframe[COL_TEXT].tolist()
 
 
+def test_write_output_json_roundtrips(stub_dataframe: pd.DataFrame, tmp_path: Path) -> None:
+    out_path = tmp_path / "out.json"
+    write_output(stub_dataframe, out_path)
+    # The writer used to fall through to to_parquet for every non-csv suffix, so a .json
+    # path silently received parquet bytes.  Check the magic number, not just readability.
+    assert not out_path.read_bytes().startswith(b"PAR1")
+    loaded = pd.read_json(out_path)
+    assert loaded[COL_TEXT].tolist() == stub_dataframe[COL_TEXT].tolist()
+
+
+def test_write_output_jsonl_roundtrips(stub_dataframe: pd.DataFrame, tmp_path: Path) -> None:
+    out_path = tmp_path / "out.jsonl"
+    write_output(stub_dataframe, out_path)
+    assert not out_path.read_bytes().startswith(b"PAR1")
+    loaded = pd.read_json(out_path, lines=True)
+    assert loaded[COL_TEXT].tolist() == stub_dataframe[COL_TEXT].tolist()
+    # One JSON object per line is what a wrong ``orient`` breaks.
+    assert len(out_path.read_text().splitlines()) == len(stub_dataframe)
+
+
 def test_write_output_unsupported_format_raises(stub_dataframe: pd.DataFrame, tmp_path: Path) -> None:
     with pytest.raises(InvalidInputError, match="Unsupported output format"):
         write_output(stub_dataframe, tmp_path / "out.xlsx")
@@ -58,6 +80,8 @@ def test_write_output_unsupported_format_raises(stub_dataframe: pd.DataFrame, tm
     [
         (".csv", lambda df, p: df.to_csv(p, index=False)),
         (".parquet", lambda df, p: df.to_parquet(p, index=False)),
+        (".json", lambda df, p: df.to_json(p, orient="records")),
+        (".jsonl", lambda df, p: df.to_json(p, orient="records", lines=True)),
     ],
 )
 def test_read_input_from_file(suffix: str, writer: Any, tmp_path: Path) -> None:
@@ -115,7 +139,7 @@ def test_read_input_from_remote_csv_url_with_fragment(monkeypatch: pytest.Monkey
 
 
 def test_read_input_remote_url_with_unsupported_format_raises() -> None:
-    inp = AnonymizerInput(source="https://example.com/data.json")
+    inp = AnonymizerInput(source="https://example.com/data.xlsx")
     with pytest.raises(InvalidInputError, match="Unsupported input format"):
         read_input(inp)
 
@@ -323,8 +347,8 @@ def test_read_input_non_colliding_columns_pass(tmp_path: Path) -> None:
 
 
 def test_read_input_unsupported_format_raises(tmp_path: Path) -> None:
-    file_path = tmp_path / "data.json"
-    file_path.write_text('{"a":[1]}')
+    file_path = tmp_path / "data.xlsx"
+    file_path.write_text("not a spreadsheet")
     inp = AnonymizerInput(source=str(file_path))
     with pytest.raises(InvalidInputError, match="Unsupported input format"):
         read_input(inp)
@@ -477,4 +501,21 @@ def test_read_input_empty_parquet_returns_empty(tmp_path: Path) -> None:
     inp = _write_input(pd.DataFrame({"text": pd.Series([], dtype="object")}), tmp_path, suffix=".parquet")
     result = read_input(inp, nrows=5)
     assert len(result.dataframe) == 0
+    assert COL_TEXT in result.dataframe.columns
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+@pytest.mark.parametrize("nrows,expected", [(0, 0), (1, 1), (None, 3)])
+def test_read_input_json_nrows_slices_and_keeps_columns(
+    suffix: str, nrows: int | None, expected: int, tmp_path: Path
+) -> None:
+    """nrows must slice and must never cost the caller the column schema.
+
+    ``pd.read_json(lines=True, nrows=0)`` reads the whole file rather than nothing, and
+    ``pd.read_json`` rejects nrows outright without ``lines=True`` -- both would be silent
+    wrong answers here.
+    """
+    inp = _write_input(pd.DataFrame({"text": ["Alice", "Bob", "Cara"]}), tmp_path, suffix)
+    result = read_input(inp, nrows=nrows)
+    assert len(result.dataframe) == expected
     assert COL_TEXT in result.dataframe.columns

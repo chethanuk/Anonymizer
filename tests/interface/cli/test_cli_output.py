@@ -69,15 +69,20 @@ def test_write_result_parquet(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("ext", [".csv", ".parquet"])
+_SOURCE_WRITERS = {
+    ".csv": lambda df, p: df.to_csv(p, index=False),
+    ".parquet": lambda df, p: df.to_parquet(p, index=False),
+    ".json": lambda df, p: df.to_json(p, orient="records"),
+    ".jsonl": lambda df, p: df.to_json(p, orient="records", lines=True),
+}
+
+
+@pytest.mark.parametrize("ext", list(_SOURCE_WRITERS))
 def test_run_default_output_path(tmp_path: Path, capsys: pytest.CaptureFixture, ext: str) -> None:
     """run with no --output writes to {stem}_anonymized{ext} next to the source."""
     source = tmp_path / f"data{ext}"
     df = pd.DataFrame({"text": ["hello"]})
-    if ext == ".csv":
-        df.to_csv(source, index=False)
-    else:
-        df.to_parquet(source, index=False)
+    _SOURCE_WRITERS[ext](df, source)
 
     mock_anonymizer = MagicMock()
     mock_anonymizer.run.return_value = _make_result()
@@ -89,6 +94,8 @@ def test_run_default_output_path(tmp_path: Path, capsys: pytest.CaptureFixture, 
 
     expected = tmp_path / f"data_anonymized{ext}"
     assert expected.exists()
+    # Existence alone passes even when the writer emits parquet bytes under a .json name.
+    assert expected.read_bytes().startswith(b"PAR1") == (ext == ".parquet")
     assert f"data_anonymized{ext}" in capsys.readouterr().out
 
 

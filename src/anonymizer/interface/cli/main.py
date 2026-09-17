@@ -239,7 +239,7 @@ def run(
     output: Annotated[
         str | None,
         cyclopts.Parameter(
-            help="Output file path (.csv or .parquet). Defaults to source stem + _anonymized or _rewritten."
+            help="Output file path (.csv, .parquet, .json or .jsonl). Defaults to source stem + _anonymized or _rewritten."
         ),
     ] = None,
 ) -> None:

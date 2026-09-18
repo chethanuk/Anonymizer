@@ -35,6 +35,7 @@ from anonymizer.engine.constants import (
     COL_TAG_NOTATION,
     COL_TAGGED_TEXT,
     COL_TEXT,
+    COL_TEXT_IS_CODE_LIKE,
     COL_VALIDATED_ENTITIES,
     COL_VALIDATION_DECISIONS,
     COL_VALIDATION_SKELETON,
@@ -632,6 +633,9 @@ PARTIAL-TOKEN RULE (HARD DROP):
 - If the tagged value is only a substring of a larger contiguous token (letters, digits, underscore with no whitespace boundary), DROP it.
 - A contiguous token means adjacent letters, digits, or underscore with no whitespace boundary.
 - If characters immediately before or after the tagged span are alphanumeric, or underscore, the tag is a partial token and must be dropped.
+{%- if <<IS_CODE_LIKE>> %}
+- This input is code-like, so a hyphen also joins a token: "procID" inside "internal-procID-id" is a partial token and must be dropped.
+{%- endif %}
 - Example:
     {%- if <<TAG_NOTATION>> == "xml" -%}
     "internal_<unique_id>procID</unique_id>_id" → drop, because "procID" is inside "internal_procID_id"
@@ -696,6 +700,7 @@ Template: <<VALIDATION_SKELETON>>
         prompt,
         {
             "<<TAG_NOTATION>>": COL_TAG_NOTATION,
+            "<<IS_CODE_LIKE>>": COL_TEXT_IS_CODE_LIKE,
             "<<TAGGED_TEXT>>": _jinja(COL_SEED_TAGGED_TEXT),
             "<<VALIDATION_SKELETON>>": _jinja(COL_VALIDATION_SKELETON),
             "<<LABEL_EXAMPLES>>": _format_label_examples(labels),

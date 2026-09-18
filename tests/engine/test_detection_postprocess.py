@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,6 +20,7 @@ from anonymizer.engine.detection.postprocess import (
     expand_entity_occurrences,
     get_tag_notation,
     group_entities_by_value,
+    is_code_like,
     normalize_label,
     normalize_labels,
     parse_raw_entities,
@@ -741,3 +745,67 @@ def test_parse_raw_entities_logs_warning_on_malformed_json(caplog: pytest.LogCap
     assert any("Failed to parse JSON" in m for m in caplog.messages)
     assert any("length=" in m for m in caplog.messages)
     assert payload not in "\n".join(caplog.messages)
+
+
+@pytest.mark.parametrize(
+    ("text", "kwargs", "expected_starts"),
+    [
+        pytest.param("procID and internal-procID-id", {"code_like": True}, {0}, id="code_ascii_hyphen_joins"),
+        pytest.param("procID and internal\u2010procID\u2010id", {"code_like": True}, {0}, id="code_u2010_joins"),
+        pytest.param("procID and internal\u2011procID\u2011id", {"code_like": True}, {0}, id="code_u2011_joins"),
+        pytest.param(
+            "procID and internal\u2013procID\u2013id", {"code_like": True}, {0, 20}, id="code_en_dash_separates"
+        ),
+        pytest.param("procID and internal-procID-id", {"code_like": False}, {0, 20}, id="prose_hyphen_separates"),
+        pytest.param("Austin then pre-Austin", {}, {0, 16}, id="default_is_prose"),
+        pytest.param("mary met Mary-Jane", {"code_like": True}, {0}, id="code_case_insensitive_hyphen_joins"),
+    ],
+)
+def test_expand_hyphen_boundary_depends_on_code_like(
+    text: str, kwargs: dict[str, Any], expected_starts: set[int]
+) -> None:
+    value = text.split()[0]
+    entities = [EntitySpan("e1", value, "unique_id", 0, len(value), 1.0, "detector")]
+    expanded = expand_entity_occurrences(text=text, entities=entities, **kwargs)
+    assert {e.start_position for e in expanded} == expected_starts
+
+
+_DOCS_DATA = Path(__file__).resolve().parents[2] / "docs" / "data"
+
+
+def _corpus_rows(name: str, column: str) -> list[str]:
+    with (_DOCS_DATA / name).open(encoding="utf-8", newline="") as handle:
+        return [row[column] for row in csv.DictReader(handle)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        *_corpus_rows("NVIDIA_synthetic_biographies.csv", "biography"),
+        *_corpus_rows("TAB_legal_sample25.csv", "text"),
+        "",
+        "I love my iPhone",
+        "Process internal-procID-id failed for Ana.",
+        "Contact Ana at ana.silva@example.com or visit https://example.com/about for details.",
+    ],
+)
+def test_is_code_like_false_for_prose(text: str) -> None:
+    assert is_code_like(text) is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param('{"user_id": "u-1234", "email": "ana@example.com", "name": "Ana Silva"}', id="json"),
+        pytest.param("kind: ConfigMap\nmetadata:\n  name: billing-api\n  ownerRef: internal-procID-id", id="yaml"),
+        pytest.param(
+            'Traceback (most recent call last):\n  File "/srv/app/main.py", line 42, in handle_request\n'
+            "    user = lookup_user(user_id)\nKeyError: 'internal-procID-id'",
+            id="stack_trace",
+        ),
+        pytest.param("2024-05-01T10:00:00Z INFO request_id=abc-123 user=ana.silva path=/api/v1/users", id="log_line"),
+        pytest.param("SELECT first_name, last_name FROM users WHERE user_id = 'internal-procID-id';", id="sql"),
+    ],
+)
+def test_is_code_like_true_for_code_logs_and_config(text: str) -> None:
+    assert is_code_like(text) is True

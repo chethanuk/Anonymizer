@@ -21,10 +21,12 @@ from data_designer.engine.models.clients.errors import SyncClientUnavailableErro
 
 from anonymizer.engine.constants import (
     COL_MERGED_TAGGED_TEXT,
+    COL_RAW_DETECTED,
     COL_SEED_ENTITIES,
     COL_SEED_VALIDATION_CANDIDATES,
     COL_TAG_NOTATION,
     COL_TEXT,
+    COL_TEXT_IS_CODE_LIKE,
     COL_VALIDATION_CANDIDATES,
     COL_VALIDATION_DECISIONS,
     COL_VALIDATION_SKELETON,
@@ -41,6 +43,8 @@ from anonymizer.engine.detection.chunked_validation import (
     order_candidates_by_position,
     render_chunk_prompt,
 )
+from anonymizer.engine.detection.custom_columns import parse_detected_entities, prepare_validation_inputs
+from anonymizer.engine.detection.detection_workflow import _get_validation_prompt
 from anonymizer.engine.detection.postprocess import EntitySpan, TagNotation, apply_validation_decisions
 from anonymizer.engine.schemas import (
     EntitiesSchema,
@@ -982,6 +986,7 @@ class TestMakeChunkedValidationGenerator:
             COL_SEED_ENTITIES,
             COL_SEED_VALIDATION_CANDIDATES,
             COL_TAG_NOTATION,
+            COL_TEXT_IS_CODE_LIKE,
         }
         # Must not declare columns we deliberately don't read; an over-broad
         # required_columns would distort DAG ordering elsewhere. In particular
@@ -1187,3 +1192,54 @@ class TestChunkedValidationRegression:
             ("f", "first_name"),  # untouched (no decision)
             # "b" dropped
         ]
+
+
+# ---------------------------------------------------------------------------
+# Production validation prompt: per-row hyphen rule for code-like text
+# ---------------------------------------------------------------------------
+
+_HYPHEN_RULE = "a hyphen also joins a token"
+
+
+def _row_from_detector(text: str, value: str) -> dict[str, Any]:
+    """Build the validator's input row the way the pipeline does, with one detector hit on *value*."""
+    start = text.index(value)
+    raw = json.dumps(
+        {"entities": [{"text": value, "label": "unique_id", "start": start, "end": start + len(value), "score": 0.9}]}
+    )
+    row = parse_detected_entities({COL_TEXT: text, COL_RAW_DETECTED: raw})
+    return prepare_validation_inputs(row)
+
+
+def _validation_prompt_sent(row: dict[str, Any]) -> str:
+    facade = FakeFacade("v0", response={"decisions": []})
+    params = ChunkedValidationParams(
+        pool=["v0"],
+        max_entities_per_call=10,
+        excerpt_window_chars=100,
+        prompt_template=_get_validation_prompt(data_summary=None, labels=["unique_id", "city"]),
+    )
+    chunked_validate_row(row, params, {"v0": facade})
+    assert len(facade.calls) == 1
+    return facade.calls[0]["prompt"]
+
+
+def test_validation_prompt_adds_hyphen_rule_for_code_like_row() -> None:
+    row = _row_from_detector('level=error svc=auth_api msg="lookup failed" id=internal-procID-id', "procID")
+    assert _HYPHEN_RULE in _validation_prompt_sent(row)
+
+
+def test_validation_prompt_omits_hyphen_rule_for_prose_row() -> None:
+    row = _row_from_detector("She planned the pre-Austin move with Ana.", "Austin")
+    assert _HYPHEN_RULE not in _validation_prompt_sent(row)
+
+
+def test_validation_prompt_renders_for_row_without_code_like_column() -> None:
+    """Rows built before the column existed still render, as prose."""
+    text = "Alice and Bob met."
+    row = _build_row(
+        text=text,
+        seed_entities=[_entity_span("a", "Alice", "first_name", 0, 5)],
+        candidates=_candidates_schema(("a", "Alice", "first_name")),
+    )
+    assert _HYPHEN_RULE not in _validation_prompt_sent(row)

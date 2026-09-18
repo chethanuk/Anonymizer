@@ -30,6 +30,7 @@ from anonymizer.engine.constants import (
     COL_TAG_NOTATION,
     COL_TAGGED_TEXT,
     COL_TEXT,
+    COL_TEXT_IS_CODE_LIKE,
     COL_VALIDATED_ENTITIES,
     COL_VALIDATED_SEED_ENTITIES,
     COL_VALIDATION_CANDIDATES,
@@ -44,6 +45,7 @@ from anonymizer.engine.detection.postprocess import (
     expand_entity_occurrences,
     filter_excluded_entity_spans,
     get_tag_notation,
+    is_code_like,
     parse_raw_entities,
 )
 from anonymizer.engine.schemas import (
@@ -57,7 +59,7 @@ from anonymizer.engine.schemas import (
 
 @custom_column_generator(
     required_columns=[COL_TEXT, COL_RAW_DETECTED],
-    side_effect_columns=[COL_TAG_NOTATION],
+    side_effect_columns=[COL_TAG_NOTATION, COL_TEXT_IS_CODE_LIKE],
 )
 def parse_detected_entities(row: dict[str, Any]) -> dict[str, Any]:
     """Parse detector payload and produce seed entities."""
@@ -69,11 +71,12 @@ def parse_detected_entities(row: dict[str, Any]) -> dict[str, Any]:
     seed_entities = [entity.as_dict() for entity in entities]
     row[COL_SEED_ENTITIES] = EntitiesSchema(entities=seed_entities).model_dump(mode="json")
     row[COL_TAG_NOTATION] = get_tag_notation(text=text)
+    row[COL_TEXT_IS_CODE_LIKE] = is_code_like(text)
     return row
 
 
 @custom_column_generator(
-    required_columns=[COL_TEXT, COL_VALIDATED_SEED_ENTITIES, COL_AUGMENTED_ENTITIES],
+    required_columns=[COL_TEXT, COL_VALIDATED_SEED_ENTITIES, COL_AUGMENTED_ENTITIES, COL_TEXT_IS_CODE_LIKE],
     side_effect_columns=[COL_MERGED_TAGGED_TEXT, COL_VALIDATION_CANDIDATES],
 )
 def merge_and_build_candidates(
@@ -94,6 +97,7 @@ def merge_and_build_candidates(
         entities=seed_spans,
         augmented_output=row.get(COL_AUGMENTED_ENTITIES, {}),
         excluded_entity_labels=set(excluded_entity_labels or []),
+        code_like=bool(row.get(COL_TEXT_IS_CODE_LIKE, False)),
     )
     merged_entities = [entity.as_dict() for entity in merged]
     row[COL_MERGED_ENTITIES] = EntitiesSchema(entities=merged_entities).model_dump(mode="json")
@@ -172,7 +176,7 @@ def enrich_validation_decisions(row: dict[str, Any]) -> dict[str, Any]:
 
 
 @custom_column_generator(
-    required_columns=[COL_TEXT, COL_MERGED_ENTITIES, COL_VALIDATED_ENTITIES],
+    required_columns=[COL_TEXT, COL_MERGED_ENTITIES, COL_VALIDATED_ENTITIES, COL_TEXT_IS_CODE_LIKE],
     side_effect_columns=[COL_TAGGED_TEXT],
 )
 def apply_validation_and_finalize(
@@ -188,7 +192,11 @@ def apply_validation_and_finalize(
         validation_output=row.get(COL_VALIDATED_ENTITIES, {}),
     )
     validated = filter_excluded_entity_spans(validated, excluded_entity_labels)
-    expanded = expand_entity_occurrences(text=text, entities=validated)
+    expanded = expand_entity_occurrences(
+        text=text,
+        entities=validated,
+        code_like=bool(row.get(COL_TEXT_IS_CODE_LIKE, False)),
+    )
     row[COL_DETECTED_ENTITIES] = EntitiesSchema(entities=[entity.as_dict() for entity in expanded]).model_dump(
         mode="json"
     )

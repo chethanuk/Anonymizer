@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from anonymizer.engine.constants import (
     COL_AUGMENTED_ENTITIES,
     COL_DETECTED_ENTITIES,
@@ -321,3 +323,67 @@ def test_apply_validation_and_finalize_handles_malformed_merged_entities() -> No
 
     result = apply_validation_and_finalize(row)
     assert result[COL_DETECTED_ENTITIES] == {"entities": []}
+
+
+_LOG_LINE = 'level=error svc=auth_api msg="lookup failed" id=internal{sep}procID{sep}id user=procID'
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "label"),
+    [
+        pytest.param(_LOG_LINE.format(sep="-"), "procID", "unique_id", id="code_hyphen_identifier_not_split"),
+        pytest.param(_LOG_LINE.format(sep="\u2011"), "procID", "unique_id", id="code_non_breaking_hyphen"),
+        pytest.param(_LOG_LINE.format(sep="_"), "procID", "unique_id", id="code_underscore_still_split"),
+    ],
+)
+def test_code_like_row_does_not_tag_value_inside_hyphenated_identifier(text: str, value: str, label: str) -> None:
+    detected = _run_detection_rows(text=text, augmented=[{"value": value, "label": label}])
+
+    standalone = text.rindex(value)
+    assert [(e["start_position"], e["end_position"]) for e in detected if e["value"] == value] == [
+        (standalone, standalone + len(value))
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("She planned the pre-Austin move before settling in Austin.", id="prose"),
+        pytest.param("McCarthy and DeShawn left pre-Austin for Austin.", id="prose_camel_names"),
+        pytest.param(
+            "Hi team, the job failed at pre-Austin sync (see main() -> retry) and again in Austin.",
+            id="mixed_prose_and_code_reads_as_prose",
+        ),
+    ],
+)
+def test_prose_row_keeps_value_after_hyphenated_prefix(text: str) -> None:
+    detected = _run_detection_rows(text=text, augmented=[{"value": "Austin", "label": "city"}])
+
+    first = text.index("Austin")
+    second = text.rindex("Austin")
+    assert [(e["start_position"], e["end_position"]) for e in detected if e["value"] == "Austin"] == [
+        (first, first + 6),
+        (second, second + 6),
+    ]
+
+
+def test_code_like_row_keeps_hyphenated_number() -> None:
+    text = "level=info svc=crm_api user_id=4411 phone=+1-555-123-4567 zip=78701-1234"
+    detected = _run_detection_rows(
+        text=text,
+        augmented=[{"value": "555-123-4567", "label": "phone_number"}, {"value": "78701", "label": "postcode"}],
+    )
+
+    assert sorted(e["value"] for e in detected) == ["555-123-4567", "78701"]
+
+
+def _run_detection_rows(*, text: str, augmented: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Drive a row through parse -> seed validation -> merge -> finalize with no detector hits."""
+    row: dict[str, Any] = {COL_TEXT: text, COL_RAW_DETECTED: _raw([])}
+    row = parse_detected_entities(row)
+    row[COL_VALIDATED_ENTITIES] = {"decisions": []}
+    row = apply_validation_to_seed_entities(row)
+    row[COL_AUGMENTED_ENTITIES] = {"entities": augmented}
+    row = merge_and_build_candidates(row)
+    row = apply_validation_and_finalize(row)
+    return row[COL_DETECTED_ENTITIES]["entities"]

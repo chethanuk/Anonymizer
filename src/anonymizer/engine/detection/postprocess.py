@@ -184,7 +184,7 @@ def apply_augmented_entities(
     augmented_output: dict | str,
     excluded_entity_labels: set[str] | None = None,
 ) -> list[EntitySpan]:
-    """Add allowed augmented entities, split full names, and resolve overlaps."""
+    """Add allowed augmented entities, split conjoined and full names, and resolve overlaps."""
     payload = _safe_json_loads(augmented_output) if isinstance(augmented_output, str) else augmented_output
     augmented = payload.get("entities", []) if isinstance(payload, dict) else []
     if not isinstance(augmented, list):
@@ -213,8 +213,88 @@ def apply_augmented_entities(
                 )
             )
 
+    merged = _split_conjoined_person_names(text=text, entities=merged, excluded=excluded)
     merged = _split_full_names(text=text, entities=merged)
     return resolve_overlaps(merged)
+
+
+_PERSON_NAME_LABELS = frozenset({"first_name", "middle_name", "last_name", "full_name"})
+
+# A person span is split only when it actually contains a conjunction, which is why the comma
+# alternative below cannot touch a "Smith, John" style full name. ``&(?!\w)`` matches "Aria & Leo"
+# but not the HTML-escaped "Aria &amp; Leo", whose parts would be garbage.
+_CONJUNCTION_PATTERN = re.compile(r"\band\b|&(?!\w)", flags=re.IGNORECASE)
+_NAME_SEPARATOR_PATTERN = re.compile(r"\s*(?:,|\band\b|&(?!\w))\s*", flags=re.IGNORECASE)
+
+
+def _split_conjoined_person_names(
+    text: str, entities: list[EntitySpan], excluded: set[str] | None = None
+) -> list[EntitySpan]:
+    """Replace a person span that swallowed a conjunction with one span per name.
+
+    A detector that scores "Aria and Leo" above threshold emits it as a single
+    ``first_name`` span, and :func:`resolve_overlaps` prefers that longer span
+    over the two names inside it. The merged value then keys the replacement
+    map, so a later standalone "Aria" is never matched.
+
+    Unlike :func:`_split_full_names` this *replaces* the parent span instead of
+    adding to it: each part overlaps the parent, so keeping it would let
+    :func:`resolve_overlaps` discard the very spans this adds.
+
+    Known ceiling: English conjunctions ("and", "&") and the labels in
+    ``_PERSON_NAME_LABELS`` only. Non-English conjunctions ("y", "und", "et")
+    are left alone even though the detector checkpoint is multilingual.
+    """
+    excluded = excluded or set()
+    # Positions already carried by some other span. Dedupe has to be positional, not by
+    # value: this function removes the parent, so skipping a part because its value exists
+    # *somewhere else* would leave the parent's own offsets untagged.
+    occupied = {(entity.start_position, entity.end_position) for entity in entities}
+    result: list[EntitySpan] = []
+
+    for entity in entities:
+        is_person = normalize_label(entity.label) in _PERSON_NAME_LABELS
+        if not is_person or not _CONJUNCTION_PATTERN.search(entity.value):
+            result.append(entity)
+            continue
+        parts = [part for part in _NAME_SEPARATOR_PATTERN.split(entity.value) if len(part) > 1]
+        if len(parts) < 2:
+            result.append(entity)
+            continue
+
+        split_spans: list[EntitySpan] = []
+        located = True
+        for part in parts:
+            occurrences = _find_all_occurrences(text=text, needle=part)
+            if not occurrences:
+                located = False
+                break
+            # A one-token piece of a full_name is a given name, not a full name. Not when
+            # first_name is excluded though: exclusions are applied before this runs, so
+            # relabelling would hand the name to a later filter and untag it.
+            is_given_name = normalize_label(entity.label) == "full_name" and " " not in part
+            part_label = "first_name" if is_given_name and "first_name" not in excluded else entity.label
+            split_spans.extend(
+                EntitySpan(
+                    entity_id=_build_entity_id(label=part_label, start=start, end=end),
+                    value=part,
+                    label=part_label,
+                    start_position=start,
+                    end_position=end,
+                    score=entity.score,
+                    source="conjunction_split",
+                )
+                for start, end in occurrences
+                if (start, end) not in occupied
+            )
+
+        if not located:
+            # Keep the merged span rather than lose the entity outright.
+            result.append(entity)
+            continue
+        result.extend(split_spans)
+
+    return result
 
 
 def _split_full_names(text: str, entities: list[EntitySpan]) -> list[EntitySpan]:

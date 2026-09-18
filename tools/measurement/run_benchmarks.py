@@ -441,8 +441,10 @@ def _input_columns(source: str) -> set[str] | None:
     if suffix == ".json":
         return set(pd.read_json(source).columns)
     if suffix == ".jsonl":
-        # nrows=1, not 0: pandas reads the whole file when nrows is 0, which defeats a preflight.
-        return set(pd.read_json(source, lines=True, nrows=1).columns)
+        # Whole file, not nrows=1: records may be ragged, and a column that first appears
+        # in a later record would otherwise be reported missing.  csv reads a full header
+        # and parquet a full schema, so this is what it costs to match them.
+        return set(pd.read_json(source, lines=True).columns)
     return set(pq.ParquetFile(source).schema_arrow.names)
 
 

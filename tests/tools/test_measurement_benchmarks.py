@@ -731,6 +731,21 @@ def test_build_input_materializes_sliced_jsonl_workload(load_tool: Callable[...,
     ]
 
 
+def test_benchmark_preflight_accepts_ragged_jsonl_workload(
+    load_tool: Callable[..., ModuleType], tmp_path: Path
+) -> None:
+    """A column that first appears in a later record still counts as present.
+
+    Reading only the first record would report ``text`` missing here, while csv gets a
+    full header and parquet a full schema.
+    """
+    tool = load_tool("measurement_benchmark_tool_ragged_jsonl", REPO_ROOT / "tools/measurement/run_benchmarks.py")
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text('{"id": "a"}\n{"id": "b", "text": "row-b"}\n', encoding="utf-8")
+
+    assert tool._input_columns(str(input_path)) == {"id", "text"}
+
+
 def test_benchmark_preflight_rejects_sliced_remote_workload(
     load_tool: Callable[..., ModuleType], tmp_path: Path
 ) -> None:

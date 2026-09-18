@@ -1187,3 +1187,55 @@ def test_run_needs_human_review_not_overwritten_by_evaluate(
     )
 
     assert bool(result.dataframe[COL_NEEDS_HUMAN_REVIEW].iloc[0]) is True
+
+
+@pytest.mark.parametrize(
+    ("any_high_leaked", "leakage_mass", "utility_score", "expected_review"),
+    [
+        pytest.param(True, 0.96, 0.97, False, id="high_leak_alone_does_not_flag"),
+        pytest.param(True, 2.5, 0.97, True, id="leakage_above_threshold_flags"),
+        pytest.param(True, 0.96, 0.4, True, id="utility_below_threshold_flags"),
+        pytest.param(True, 2.0, 0.97, False, id="leakage_exactly_at_threshold_does_not_flag"),
+        pytest.param(False, 0.1, 0.9, False, id="passing_row_not_flagged"),
+    ],
+)
+def test_run_needs_human_review_uses_threshold_metrics_only(
+    stub_model_configs: list[ModelConfig],
+    stub_rewrite_model_selection: RewriteModelSelection,
+    stub_replace_model_selection: ReplaceModelSelection,
+    stub_df_with_entities: pd.DataFrame,
+    stub_replace_df: pd.DataFrame,
+    stub_pipeline_df: pd.DataFrame,
+    stub_eval_df: pd.DataFrame,
+    any_high_leaked: bool,
+    leakage_mass: float,
+    utility_score: float,
+    expected_review: bool,
+) -> None:
+    """A single high-sensitivity leak must not flag a row whose metrics are inside thresholds.
+
+    Thresholds are the default ``low`` preset: flag_utility_below=0.5, flag_leakage_above=2.0.
+    """
+    eval_df = stub_eval_df.copy()
+    eval_df[COL_ANY_HIGH_LEAKED] = any_high_leaked
+    eval_df[COL_LEAKAGE_MASS] = leakage_mass
+    eval_df[COL_UTILITY_SCORE] = utility_score
+
+    adapter = Mock()
+    adapter.run_workflow.side_effect = _standard_side_effect(stub_pipeline_df, eval_df)
+
+    with patch(_REPLACE_PATCH) as mock_replace_cls:
+        _mock_replace(mock_replace_cls, stub_replace_df)
+        result = RewriteWorkflow(adapter=adapter).run(
+            stub_df_with_entities,
+            model_configs=stub_model_configs,
+            selected_models=stub_rewrite_model_selection,
+            replace_model_selection=stub_replace_model_selection,
+            privacy_goal=_PRIVACY_GOAL,
+            evaluation=EvaluationCriteria(max_repair_iterations=0),
+        )
+
+    row = result.dataframe.iloc[0]
+    assert bool(row[COL_NEEDS_HUMAN_REVIEW]) is expected_review
+    # The signal stays a user-facing output column; only its use as a review gate is removed.
+    assert bool(row[COL_ANY_HIGH_LEAKED]) is any_high_leaked

@@ -197,6 +197,38 @@ def test_finalizer_selects_last_executed_iteration(
     assert result[COL_NEEDS_HUMAN_REVIEW] is False
 
 
+def test_finalizer_does_not_flag_review_on_high_leak_alone(
+    stub_rewrite_model_selection: RewriteModelSelection,
+    stub_replace_model_selection: ReplaceModelSelection,
+) -> None:
+    """Parity with the legacy path: a high-sensitivity leak alone must not set needs_human_review."""
+    graph = CombinedRewriteWorkflow(adapter=Mock()).build_graph(
+        selected_models=stub_rewrite_model_selection,
+        replace_model_selection=stub_replace_model_selection,
+        privacy_goal=_PRIVACY_GOAL,
+        evaluation=EvaluationCriteria(max_repair_iterations=0),
+    )
+    (initial,) = graph.evaluation_states
+    row = {
+        initial.rewritten_text: "Initial rewrite",
+        initial.quality_reanswer: {"answers": []},
+        initial.privacy_reanswer: {"answers": []},
+        initial.quality_compare: {"per_item": []},
+        initial.utility_score: 0.97,
+        initial.leakage_mass: 0.96,
+        initial.weighted_leakage_rate: 0.4,
+        initial.any_high_leaked: True,
+        initial.needs_repair: False,
+    }
+    finalizer = graph.columns[-1]
+    assert isinstance(finalizer, CustomColumnConfig)
+
+    result = finalizer.generator_function(row, finalizer.generator_params)
+
+    assert result[COL_NEEDS_HUMAN_REVIEW] is False
+    assert result[COL_ANY_HIGH_LEAKED] is True
+
+
 def test_combined_graph_preserves_malformed_rewrite_handling(
     stub_rewrite_model_selection: RewriteModelSelection,
     stub_replace_model_selection: ReplaceModelSelection,
@@ -249,7 +281,10 @@ def test_conditional_repairs_execute_independently_per_row(
     ]
     assert result.dataframe[COL_REPAIR_ITERATIONS].tolist() == [0, 1, 2, 2]
     assert result.dataframe[COL_NEEDS_REPAIR].tolist() == [False, False, False, True]
-    assert result.dataframe[COL_NEEDS_HUMAN_REVIEW].tolist() == [False, False, False, True]
+    # Row 3 exhausts its repair budget, but its metrics (utility 0.5, leakage 1.0) stay inside the
+    # ``low`` preset's review thresholds (flag_utility_below=0.5, flag_leakage_above=2.0), so it is
+    # not flagged for review. An unresolved high-sensitivity leak keeps driving repair, not review.
+    assert result.dataframe[COL_NEEDS_HUMAN_REVIEW].tolist() == [False, False, False, False]
     workflow_records = [record for record in collector.records if record["record_type"] == "ndd_workflow"]
     assert len(workflow_records) == 1
     assert workflow_records[0]["workflow_name"] == "rewrite-combined"

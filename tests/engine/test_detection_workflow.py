@@ -28,6 +28,7 @@ from anonymizer.engine.constants import (
     COL_TAG_NOTATION,
     COL_TAGGED_TEXT,
     COL_TEXT,
+    COL_TEXT_IS_CODE_LIKE,
     COL_VALIDATED_ENTITIES,
     COL_VALIDATION_DECISIONS,
     DEFAULT_ENTITY_LABELS,
@@ -881,6 +882,7 @@ def test_validation_column_is_chunked_validation_plugin(
         COL_SEED_ENTITIES,
         COL_SEED_VALIDATION_CANDIDATES,
         COL_TAG_NOTATION,
+        COL_TEXT_IS_CODE_LIKE,
     }
 
 

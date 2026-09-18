@@ -22,6 +22,7 @@ from anonymizer.engine.constants import (
     COL_TAG_NOTATION,
     COL_TAGGED_TEXT,
     COL_TEXT,
+    COL_TEXT_IS_CODE_LIKE,
     COL_VALIDATED_ENTITIES,
     COL_VALIDATED_SEED_ENTITIES,
     COL_VALIDATION_CANDIDATES,
@@ -59,15 +60,17 @@ class DetectionTransformConfig(SingleColumnConfig):
             COL_TEXT,
             COL_VALIDATED_SEED_ENTITIES,
             COL_AUGMENTED_ENTITIES,
+            COL_TEXT_IS_CODE_LIKE,
         ],
         DetectionTransformOperation.APPLY_VALIDATION_AND_FINALIZE: [
             COL_TEXT,
             COL_MERGED_ENTITIES,
             COL_VALIDATED_ENTITIES,
+            COL_TEXT_IS_CODE_LIKE,
         ],
     }
     _SIDE_EFFECT_COLUMNS: ClassVar[dict[DetectionTransformOperation, list[str]]] = {
-        DetectionTransformOperation.PARSE_DETECTED_ENTITIES: [COL_TAG_NOTATION],
+        DetectionTransformOperation.PARSE_DETECTED_ENTITIES: [COL_TAG_NOTATION, COL_TEXT_IS_CODE_LIKE],
         DetectionTransformOperation.PREPARE_VALIDATION_INPUTS: [COL_SEED_TAGGED_TEXT],
         DetectionTransformOperation.ENRICH_VALIDATION_DECISIONS: [],
         DetectionTransformOperation.APPLY_VALIDATION_TO_SEED_ENTITIES: [
@@ -116,6 +119,7 @@ class ChunkedValidationConfig(SingleColumnConfig):
             COL_SEED_ENTITIES,
             COL_SEED_VALIDATION_CANDIDATES,
             COL_TAG_NOTATION,
+            COL_TEXT_IS_CODE_LIKE,
         ]
 
     @property

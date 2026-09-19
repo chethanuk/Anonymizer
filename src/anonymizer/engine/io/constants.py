@@ -3,4 +3,4 @@
 
 from __future__ import annotations
 
-SUPPORTED_IO_FORMATS: tuple[str, ...] = (".csv", ".parquet")
+SUPPORTED_IO_FORMATS: tuple[str, ...] = (".csv", ".parquet", ".json", ".jsonl")

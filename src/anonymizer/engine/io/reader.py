@@ -178,6 +178,18 @@ def _read_parquet_partial(source: str, *, nrows: int | None = None) -> pd.DataFr
     return table.slice(0, nrows).to_pandas()
 
 
+def _read_jsonl_partial(source: str, *, nrows: int | None = None) -> pd.DataFrame:
+    """Read a JSON Lines file, stopping early when *nrows* is set.
+
+    ``pd.read_json`` treats ``nrows=0`` as "no limit" rather than "no rows", so passing
+    *nrows* straight through would read the whole file.  Read a single record and slice it
+    away instead, which keeps the column schema and matches the csv and parquet paths.
+    """
+    if nrows is not None and nrows <= 0:
+        return pd.read_json(source, lines=True, nrows=1).iloc[0:0]
+    return pd.read_json(source, lines=True, nrows=nrows)
+
+
 def _load_dataframe(input_data: AnonymizerInput, *, nrows: int | None = None) -> pd.DataFrame:
     source_str = str(input_data.source)
     suffix = infer_input_source_suffix(source_str)
@@ -189,6 +201,15 @@ def _load_dataframe(input_data: AnonymizerInput, *, nrows: int | None = None) ->
     try:
         if suffix == ".csv":
             df = pd.read_csv(source_str, nrows=nrows)
+        elif suffix == ".jsonl":
+            df = _read_jsonl_partial(source_str, nrows=nrows)
+        elif suffix == ".json":
+            # pandas rejects nrows unless lines=True, so the whole file is read and sliced
+            # after the fact.  head(max(nrows, 0)) because head(-1) drops the last row
+            # rather than raising, which would be a silently wrong answer.
+            df = pd.read_json(source_str)
+            if nrows is not None:
+                df = df.head(max(nrows, 0))
         else:
             df = _read_parquet_partial(source_str, nrows=nrows)
     except (OSError, pd.errors.ParserError, ValueError) as error:

@@ -438,6 +438,13 @@ def _input_columns(source: str) -> set[str] | None:
         return None
     if suffix == ".csv":
         return set(pd.read_csv(source, nrows=0).columns)
+    if suffix == ".json":
+        return set(pd.read_json(source).columns)
+    if suffix == ".jsonl":
+        # Whole file, not nrows=1: records may be ragged, and a column that first appears
+        # in a later record would otherwise be reported missing.  csv reads a full header
+        # and parquet a full schema, so this is what it costs to match them.
+        return set(pd.read_json(source, lines=True).columns)
     return set(pq.ParquetFile(source).schema_arrow.names)
 
 
@@ -917,6 +924,10 @@ def _read_local_input_dataframe(source: Path, *, suffix: str) -> pd.DataFrame:
         return pd.read_csv(source)
     if suffix == ".parquet":
         return pd.read_parquet(source)
+    if suffix == ".json":
+        return pd.read_json(source)
+    if suffix == ".jsonl":
+        return pd.read_json(source, lines=True)
     supported_formats = " or ".join(SUPPORTED_IO_FORMATS)
     raise ValueError(f"Unsupported input format: {suffix}. Use {supported_formats}.")
 
@@ -927,6 +938,12 @@ def _write_local_input_dataframe(dataframe: pd.DataFrame, destination: Path, *, 
         return
     if suffix == ".parquet":
         dataframe.to_parquet(destination, index=False)
+        return
+    if suffix == ".json":
+        dataframe.to_json(destination, orient="records")
+        return
+    if suffix == ".jsonl":
+        dataframe.to_json(destination, orient="records", lines=True)
         return
     supported_formats = " or ".join(SUPPORTED_IO_FORMATS)
     raise ValueError(f"Unsupported input format: {suffix}. Use {supported_formats}.")

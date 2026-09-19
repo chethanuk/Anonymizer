@@ -12,7 +12,7 @@ from anonymizer.interface.errors import AnonymizerIOError, InvalidInputError
 
 
 def write_output(dataframe: pd.DataFrame, output_path: str | Path) -> Path:
-    """Write dataframe to csv/parquet based on output suffix."""
+    """Write dataframe to csv/parquet/json/jsonl based on output suffix."""
     path = Path(output_path)
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED_IO_FORMATS:
@@ -21,8 +21,16 @@ def write_output(dataframe: pd.DataFrame, output_path: str | Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         if suffix == ".csv":
             dataframe.to_csv(path, index=False)
-            return path
-        dataframe.to_parquet(path, index=False)
+        elif suffix == ".json":
+            dataframe.to_json(path, orient="records")
+        elif suffix == ".jsonl":
+            dataframe.to_json(path, orient="records", lines=True)
+        elif suffix == ".parquet":
+            dataframe.to_parquet(path, index=False)
+        else:
+            # Unreachable while the gate above holds.  It exists so the next format added to
+            # SUPPORTED_IO_FORMATS fails loudly instead of being silently written as parquet.
+            raise InvalidInputError(f"Unsupported output format: {suffix!r}")
         return path
     except (OSError, ValueError) as error:
         raise AnonymizerIOError(f"Failed to write output data to path: {path}") from error

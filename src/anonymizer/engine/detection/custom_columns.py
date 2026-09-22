@@ -47,6 +47,7 @@ from anonymizer.engine.detection.postprocess import (
     get_tag_notation,
     is_code_like,
     parse_raw_entities,
+    widen_hyphen_compounds,
 )
 from anonymizer.engine.schemas import (
     EntitiesSchema,
@@ -76,7 +77,7 @@ def parse_detected_entities(row: dict[str, Any]) -> dict[str, Any]:
 
 
 @custom_column_generator(
-    required_columns=[COL_TEXT, COL_VALIDATED_SEED_ENTITIES, COL_AUGMENTED_ENTITIES, COL_TEXT_IS_CODE_LIKE],
+    required_columns=[COL_TEXT, COL_VALIDATED_SEED_ENTITIES, COL_AUGMENTED_ENTITIES],
     side_effect_columns=[COL_MERGED_TAGGED_TEXT, COL_VALIDATION_CANDIDATES],
 )
 def merge_and_build_candidates(
@@ -97,7 +98,6 @@ def merge_and_build_candidates(
         entities=seed_spans,
         augmented_output=row.get(COL_AUGMENTED_ENTITIES, {}),
         excluded_entity_labels=set(excluded_entity_labels or []),
-        code_like=bool(row.get(COL_TEXT_IS_CODE_LIKE, False)),
     )
     merged_entities = [entity.as_dict() for entity in merged]
     row[COL_MERGED_ENTITIES] = EntitiesSchema(entities=merged_entities).model_dump(mode="json")
@@ -192,11 +192,10 @@ def apply_validation_and_finalize(
         validation_output=row.get(COL_VALIDATED_ENTITIES, {}),
     )
     validated = filter_excluded_entity_spans(validated, excluded_entity_labels)
-    expanded = expand_entity_occurrences(
-        text=text,
-        entities=validated,
-        code_like=bool(row.get(COL_TEXT_IS_CODE_LIKE, False)),
-    )
+    expanded = expand_entity_occurrences(text=text, entities=validated)
+    if row.get(COL_TEXT_IS_CODE_LIKE, False):
+        # After validation, so the validator judges the same spans as on prose rows.
+        expanded = widen_hyphen_compounds(text=text, entities=expanded)
     row[COL_DETECTED_ENTITIES] = EntitiesSchema(entities=[entity.as_dict() for entity in expanded]).model_dump(
         mode="json"
     )

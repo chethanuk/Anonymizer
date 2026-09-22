@@ -60,7 +60,6 @@ class DetectionTransformConfig(SingleColumnConfig):
             COL_TEXT,
             COL_VALIDATED_SEED_ENTITIES,
             COL_AUGMENTED_ENTITIES,
-            COL_TEXT_IS_CODE_LIKE,
         ],
         DetectionTransformOperation.APPLY_VALIDATION_AND_FINALIZE: [
             COL_TEXT,

@@ -15,24 +15,19 @@ logger = logging.getLogger(__name__)
 
 VALIDATION_CONTEXT_WINDOW = 32
 
-# Characters that continue a token for partial-token matching. In code-like text a hyphen
-# (ASCII, U+2010 or U+2011) also continues one, so "procID" is not a match inside
-# "internal-procID-id". In prose it stays a boundary, so "Austin" still matches in "pre-Austin".
-# En and em dashes separate clauses and stay boundaries in both. The hyphen only joins at a
-# letter edge of the value: in "+1-555-123-4567" or "78701-1234" it formats a number, so
-# digit-edged values keep the prose boundary.
-_TOKEN_CHARS = "A-Za-z0-9_"
-_CODE_TOKEN_CHARS = _TOKEN_CHARS + "\\-\u2010\u2011"
+# Hyphens that join a code token: ASCII, U+2010 and U+2011. En and em dashes separate clauses
+# and are never joiners.
+_HYPHENS = "-\u2010\u2011"
 
 # A whitespace token carrying any of these reads as code, logs or config rather than prose:
 # braces, backticks, backslashes, "::", a call "name(", a quoted JSON key '"key":', a file
-# path "/dir/file.ext", an operator with no space on either side ("a=b", "a->b", "a<b",
-# "a;b"), snake_case, or lowerCamelCase starting with two lowercase letters. Spaced operators ("x = 1", "late; we")
-# and PascalCase or one-letter prefixes (McCarthy, DeShawn, MacBook, iPhone) are common in
-# prose, so they do not count.
-_CODE_MARK_RE = re.compile(
-    r'[{}`\\]|::|\w\(|":|/\w+\.\w|\S(?:=|<|>|;|->)\S|[A-Za-z0-9]_[A-Za-z0-9]|(?<![A-Za-z])[a-z]{2,}[A-Z]'
-)
+# path "/dir/file.ext", snake_case, or lowerCamelCase starting with two lowercase letters.
+# PascalCase or one-letter prefixes (McCarthy, DeShawn, MacBook, iPhone) are common in prose,
+# so they do not count.
+_CODE_MARK_RE = re.compile(r'[{}`\\]|::|\w\(|":|/\w+\.\w|[A-Za-z0-9]_[A-Za-z0-9]|(?<![A-Za-z])[a-z]{2,}[A-Z]')
+# An operator with no space on either side ("a=b", "a->b", "a<b", "a;b") is a weaker mark: notes
+# write "BP=120/80" or "Q3->Q4" too. It adds to the count but cannot make a row code-like alone.
+_OPERATOR_MARK_RE = re.compile(r"\S(?:=|<|>|;|->)\S")
 
 
 @dataclass(frozen=True)
@@ -202,13 +197,8 @@ def apply_augmented_entities(
     entities: list[EntitySpan],
     augmented_output: dict | str,
     excluded_entity_labels: set[str] | None = None,
-    *,
-    code_like: bool = False,
 ) -> list[EntitySpan]:
-    """Add allowed augmented entities, split full names, and resolve overlaps.
-
-    ``code_like`` treats hyphens as part of a token when locating suggested values.
-    """
+    """Add allowed augmented entities, split full names, and resolve overlaps."""
     payload = _safe_json_loads(augmented_output) if isinstance(augmented_output, str) else augmented_output
     augmented = payload.get("entities", []) if isinstance(payload, dict) else []
     if not isinstance(augmented, list):
@@ -223,7 +213,7 @@ def apply_augmented_entities(
         label = str(suggestion.get("label", "")).strip()
         if not value or not label or normalize_label(label) in excluded:
             continue
-        for start, end in _find_all_occurrences(text=text, needle=value, code_like=code_like):
+        for start, end in _find_all_occurrences(text=text, needle=value):
             entity_id = _build_entity_id(label=label, start=start, end=end)
             merged.append(
                 EntitySpan(
@@ -237,11 +227,11 @@ def apply_augmented_entities(
                 )
             )
 
-    merged = _split_full_names(text=text, entities=merged, code_like=code_like)
+    merged = _split_full_names(text=text, entities=merged)
     return resolve_overlaps(merged)
 
 
-def _split_full_names(text: str, entities: list[EntitySpan], *, code_like: bool = False) -> list[EntitySpan]:
+def _split_full_names(text: str, entities: list[EntitySpan]) -> list[EntitySpan]:
     """Split ``full_name`` entities into first/middle/last name parts.
 
     When a ``full_name`` span like "John Smith" is detected, this adds
@@ -267,7 +257,7 @@ def _split_full_names(text: str, entities: list[EntitySpan], *, code_like: bool 
                 part_label = "last_name"
             else:
                 part_label = "middle_name"
-            for start, end in _find_all_occurrences(text=text, needle=part, code_like=code_like):
+            for start, end in _find_all_occurrences(text=text, needle=part):
                 entity_id = _build_entity_id(label=part_label, start=start, end=end)
                 extra.append(
                     EntitySpan(
@@ -361,31 +351,73 @@ def get_tag_notation(text: str) -> str:
 def is_code_like(text: str) -> bool:
     """Return True when *text* reads as code, logs or config rather than prose.
 
-    Counts whitespace tokens that carry a code mark (see ``_CODE_MARK_RE``) and needs both
-    at least two such tokens and a 20% share. The share alone would flag a sentence that
-    mentions a single identifier; the count alone would flag a long document that quotes a
-    few. Calling prose code-like loses matches next to hyphens, so the rule errs toward prose.
-    It decides once per row: a stack trace pasted into prose gets one answer for the whole row.
+    Counts whitespace tokens that carry a code mark (see ``_CODE_MARK_RE`` and
+    ``_OPERATOR_MARK_RE``) and needs at least two such tokens, a 20% share, and at least one
+    token with a strong mark. The share alone would flag a sentence that mentions a single
+    identifier; the count alone would flag a long document that quotes a few. It decides once
+    per row: a stack trace pasted into prose gets one answer for the whole row.
+
+    The answer only decides whether ``widen_hyphen_compounds`` runs, which never removes a
+    span. A wrong answer either way costs precision, not privacy.
     """
-    tokens = text.split()
     # Emails and URLs show up in prose all the time; their "_" and "=" are not code marks.
-    hits = sum(1 for token in tokens if "@" not in token and "://" not in token and _CODE_MARK_RE.search(token))
-    return hits >= 2 and hits >= 0.2 * len(tokens)
+    tokens = [token for token in text.split() if "@" not in token and "://" not in token]
+    strong = sum(1 for token in tokens if _CODE_MARK_RE.search(token))
+    hits = strong + sum(1 for token in tokens if not _CODE_MARK_RE.search(token) and _OPERATOR_MARK_RE.search(token))
+    return strong >= 1 and hits >= 2 and hits >= 0.2 * len(text.split())
 
 
-def expand_entity_occurrences(
-    text: str,
-    entities: list[EntitySpan],
-    *,
-    code_like: bool = False,
-) -> list[EntitySpan]:
+def widen_hyphen_compounds(text: str, entities: list[EntitySpan]) -> list[EntitySpan]:
+    """Widen each span to the whole hyphen-joined token it sits in, for code-like text.
+
+    In code a hyphen joins a token: "ana" in "ana-lopez-fix" or "A12345" in "ID-A12345" is
+    part of one identifier. Redacting only the fragment leaves the rest of the identifier
+    ("Mary-Jane" -> "Susan-Jane") in the output, so the span grows to cover it. Spans are only
+    ever widened, never dropped. A hyphen next to a digit edge formats a number
+    ("+1-555-123-4567", "78701-1234"), so only letter edges widen.
+    """
+
+    def is_token_char(char: str) -> bool:
+        return char.isalnum() or char == "_"
+
+    widened: list[EntitySpan] = []
+    for entity in entities:
+        start, end = entity.start_position, entity.end_position
+        if text[start : start + 1].isalpha():
+            while start >= 2 and text[start - 1] in _HYPHENS and is_token_char(text[start - 2]):
+                start -= 1
+                while start > 0 and is_token_char(text[start - 1]):
+                    start -= 1
+        if text[end - 1 : end].isalpha():
+            while end + 1 < len(text) and text[end] in _HYPHENS and is_token_char(text[end + 1]):
+                end += 1
+                while end < len(text) and is_token_char(text[end]):
+                    end += 1
+        if (start, end) == (entity.start_position, entity.end_position):
+            widened.append(entity)
+            continue
+        widened.append(
+            EntitySpan(
+                entity_id=_build_entity_id(label=entity.label, start=start, end=end),
+                value=text[start:end],
+                label=entity.label,
+                start_position=start,
+                end_position=end,
+                score=entity.score,
+                source=entity.source,
+            )
+        )
+    return resolve_overlaps(widened)
+
+
+def expand_entity_occurrences(text: str, entities: list[EntitySpan]) -> list[EntitySpan]:
     """Expand each validated entity to ALL its occurrences in the text.
 
     After validation, entities only have the positions where the detector
     originally found them. This function finds every word-boundary-matched
     occurrence of each unique entity value in the text, creating new spans
     for positions not already covered. Overlaps are resolved by preferring
-    longer spans. ``code_like`` treats hyphens as part of a token.
+    longer spans.
     """
     entity_map: dict[str, str] = {}
     for entity in entities:
@@ -397,7 +429,7 @@ def expand_entity_occurrences(
     expanded: list[EntitySpan] = []
     for idx, (key, label) in enumerate(entity_map.items()):
         original_value = next(e.value for e in entities if e.value.lower() == key)
-        for start, end in _find_all_occurrences(text=text, needle=original_value, code_like=code_like):
+        for start, end in _find_all_occurrences(text=text, needle=original_value):
             if (start, end) in original_positions:
                 continue  # already covered by a detector span; skip to preserve its provenance
             entity_id = _build_entity_id(label=label, start=start, end=end)
@@ -468,16 +500,14 @@ def _spans_overlap(left: EntitySpan, right: EntitySpan) -> bool:
     return left.start_position < right.end_position and right.start_position < left.end_position
 
 
-def _find_all_occurrences(text: str, needle: str, *, code_like: bool = False) -> list[tuple[int, int]]:
+def _find_all_occurrences(text: str, needle: str) -> list[tuple[int, int]]:
     if not needle:
         return []
-    before = _CODE_TOKEN_CHARS if code_like and needle[0].isalpha() else _TOKEN_CHARS
-    after = _CODE_TOKEN_CHARS if code_like and needle[-1].isalpha() else _TOKEN_CHARS
     escaped = re.escape(needle)
     if needle[0].isalnum() or needle[0] == "_":
-        escaped = rf"(?<![{before}]){escaped}"
+        escaped = rf"(?<![A-Za-z0-9_]){escaped}"
     if needle[-1].isalnum() or needle[-1] == "_":
-        escaped = rf"{escaped}(?![{after}])"
+        escaped = rf"{escaped}(?![A-Za-z0-9_])"
 
     positions: list[tuple[int, int]] = []
     for match in re.finditer(escaped, text, flags=re.IGNORECASE):

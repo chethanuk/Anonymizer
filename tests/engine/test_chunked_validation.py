@@ -1198,7 +1198,7 @@ class TestChunkedValidationRegression:
 # Production validation prompt: per-row hyphen rule for code-like text
 # ---------------------------------------------------------------------------
 
-_HYPHEN_RULE = "a hyphen also joins a token"
+_HYPHEN_RULE = "a hyphen does not make a tag a partial token"
 
 
 def _row_from_detector(text: str, value: str) -> dict[str, Any]:

@@ -7,7 +7,6 @@ import csv
 import json
 import logging
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -25,6 +24,7 @@ from anonymizer.engine.detection.postprocess import (
     normalize_labels,
     parse_raw_entities,
     resolve_overlaps,
+    widen_hyphen_compounds,
 )
 
 
@@ -748,35 +748,41 @@ def test_parse_raw_entities_logs_warning_on_malformed_json(caplog: pytest.LogCap
 
 
 @pytest.mark.parametrize(
-    ("text", "kwargs", "expected_starts"),
+    ("text", "value", "expected"),
     [
-        pytest.param("procID and internal-procID-id", {"code_like": True}, {0}, id="code_ascii_hyphen_joins"),
-        pytest.param("procID and internal\u2010procID\u2010id", {"code_like": True}, {0}, id="code_u2010_joins"),
-        pytest.param("procID and internal\u2011procID\u2011id", {"code_like": True}, {0}, id="code_u2011_joins"),
+        pytest.param("id=internal-procID-id", "procID", "internal-procID-id", id="ascii_hyphen_joins"),
+        pytest.param("id=internal\u2010procID\u2010id", "procID", "internal\u2010procID\u2010id", id="u2010_joins"),
+        pytest.param("id=internal\u2011procID\u2011id", "procID", "internal\u2011procID\u2011id", id="u2011_joins"),
+        pytest.param("id=internal\u2013procID\u2013id", "procID", "procID", id="en_dash_separates"),
+        pytest.param("name=Mary-Jane", "Mary", "Mary-Jane", id="compound_name"),
+        pytest.param("ref=ID-A12345", "A12345", "ID-A12345", id="letter_edge_left"),
+        pytest.param("plate=ABC-1234", "ABC", "ABC-1234", id="letter_edge_right"),
+        pytest.param("user-jsmith-42", "jsmith", "user-jsmith-42", id="username_segment"),
+        pytest.param("https://example.com/users/ana-lopez", "ana", "ana-lopez", id="url_segment"),
         pytest.param(
-            "procID and internal\u2013procID\u2013id", {"code_like": True}, {0, 20}, id="code_en_dash_separates"
+            "id 123e4567-e89b-12d3-a456-426614174000", "e89b", "123e4567-e89b-12d3-a456-426614174000", id="uuid"
         ),
-        pytest.param("procID and internal-procID-id", {"code_like": False}, {0, 20}, id="prose_hyphen_separates"),
-        pytest.param("Austin then pre-Austin", {}, {0, 16}, id="default_is_prose"),
-        pytest.param("mary met Mary-Jane", {"code_like": True}, {0}, id="code_case_insensitive_hyphen_joins"),
-        pytest.param("e89b in 123e4567-e89b-12d3-a456-426614174000", {"code_like": True}, {0}, id="code_uuid_segment"),
-        pytest.param("555-123-4567 or +1-555-123-4567", {"code_like": True}, {0, 19}, id="code_digit_edge_phone"),
-        pytest.param("78701 or 78701-1234", {"code_like": True}, {0, 9}, id="code_digit_edge_zip"),
-        pytest.param("jsmith or user-jsmith-42", {"code_like": True}, {0}, id="code_letter_edge_username"),
-        pytest.param("e89b in 123e4567-e89b-12d3-a456-426614174000", {}, {0, 17}, id="prose_uuid_segment"),
-        pytest.param("billing in core-billing-api", {"code_like": True}, {0}, id="code_kebab_case"),
-        pytest.param("billing in core-billing-api", {}, {0, 16}, id="prose_kebab_case"),
-        pytest.param("ana at https://example.com/users/ana-lopez", {"code_like": True}, {0}, id="code_url_segment"),
-        pytest.param("ana at https://example.com/users/ana-lopez", {}, {0, 33}, id="prose_url_segment"),
+        pytest.param("phone=+1-555-123-4567", "555-123-4567", "555-123-4567", id="digit_edge_phone"),
+        pytest.param("zip=78701-1234", "78701", "78701", id="digit_edge_zip"),
+        pytest.param("to ana- and", "ana", "ana", id="dangling_hyphen"),
+        pytest.param("flag --ana", "ana", "ana", id="double_hyphen_prefix"),
     ],
 )
-def test_expand_hyphen_boundary_depends_on_code_like(
-    text: str, kwargs: dict[str, Any], expected_starts: set[int]
-) -> None:
-    value = text.split()[0]
-    entities = [EntitySpan("e1", value, "unique_id", 0, len(value), 1.0, "detector")]
-    expanded = expand_entity_occurrences(text=text, entities=entities, **kwargs)
-    assert {e.start_position for e in expanded} == expected_starts
+def test_widen_hyphen_compounds_covers_whole_token(text: str, value: str, expected: str) -> None:
+    start = text.index(value)
+    entities = [EntitySpan("e1", value, "unique_id", start, start + len(value), 0.9, "detector")]
+    widened = widen_hyphen_compounds(text=text, entities=entities)
+    assert [e.value for e in widened] == [expected]
+    assert [text[e.start_position : e.end_position] for e in widened] == [expected]
+
+
+def test_widen_hyphen_compounds_merges_parts_of_one_compound() -> None:
+    text = "slug=ana-lopez"
+    entities = [
+        EntitySpan("a", "ana", "first_name", 5, 8, 1.0, "name_split"),
+        EntitySpan("b", "lopez", "last_name", 9, 14, 1.0, "name_split"),
+    ]
+    assert [e.value for e in widen_hyphen_compounds(text=text, entities=entities)] == ["ana-lopez"]
 
 
 _DOCS_DATA = Path(__file__).resolve().parents[2] / "docs" / "data"
@@ -808,6 +814,10 @@ def _corpus_rows(name: str, column: str) -> list[str]:
         ),
         "Process internal-procID-id failed for Ana.",
         "Contact Ana at ana.silva@example.com or visit https://example.com/about for details.",
+        pytest.param("Pt Ana-Maria Lopez, BP=120/80, HR=72, SpO2=98%.", id="vitals_note"),
+        pytest.param("Grades: math=A, art=B for Mary-Jane Smith.", id="grades"),
+        pytest.param("Dear Mary-Jane, your order#=5512 ships today. Ref=AB12.", id="order_email"),
+        pytest.param("Meeting w/ Mary-Jane re: Q3->Q4 plan; budget=$5k", id="meeting_note"),
     ],
 )
 def test_is_code_like_false_for_prose(text: str) -> None:

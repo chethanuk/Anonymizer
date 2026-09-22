@@ -28,6 +28,7 @@ from anonymizer.engine.constants import (
     COL_TAG_NOTATION,
     COL_TAGGED_TEXT,
     COL_TEXT,
+    COL_TEXT_IS_CODE_LIKE,
     COL_VALIDATED_ENTITIES,
     COL_VALIDATED_SEED_ENTITIES,
     COL_VALIDATION_CANDIDATES,
@@ -325,24 +326,90 @@ def test_apply_validation_and_finalize_handles_malformed_merged_entities() -> No
     assert result[COL_DETECTED_ENTITIES] == {"entities": []}
 
 
-_LOG_LINE = 'level=error svc=auth_api msg="lookup failed" id=internal{sep}procID{sep}id user=procID'
-
-
 @pytest.mark.parametrize(
-    ("text", "value", "label"),
+    ("text", "augmented", "must_redact"),
     [
-        pytest.param(_LOG_LINE.format(sep="-"), "procID", "unique_id", id="code_hyphen_identifier_not_split"),
-        pytest.param(_LOG_LINE.format(sep="\u2011"), "procID", "unique_id", id="code_non_breaking_hyphen"),
-        pytest.param(_LOG_LINE.format(sep="_"), "procID", "unique_id", id="code_underscore_still_split"),
+        pytest.param(
+            "user_id=9 ref=ID-A12345 api_key=zz",
+            [{"value": "A12345", "label": "unique_id"}],
+            ["A12345"],
+            id="id_after_hyphen_prefix",
+        ),
+        pytest.param(
+            "user_id=9 plate=ABC-1234 veh_id=3",
+            [{"value": "ABC", "label": "license_plate"}],
+            ["ABC-1234"],
+            id="plate_letters_before_digits",
+        ),
+        pytest.param(
+            '{"contact": "mailto-ana@x.io", "user_id": 3}',
+            [{"value": "ana@x.io", "label": "email"}],
+            ["ana@x.io"],
+            id="email_after_hyphen_prefix",
+        ),
+        pytest.param(
+            "user_id=9 dob=1981-03-04 name_id=Mary-Jane",
+            [{"value": "Mary", "label": "first_name"}],
+            ["Mary-Jane"],
+            id="compound_first_name_redacted_whole",
+        ),
+        pytest.param(
+            '{"name": "Ana Lopez", "slug": "ana-lopez", "user_id": 5}',
+            [{"value": "Ana Lopez", "label": "full_name"}],
+            ["Ana Lopez", "ana-lopez"],
+            id="name_slug_from_full_name",
+        ),
+        pytest.param(
+            "level=info svc=git_sync branch=feature/ana-lopez-fix author=ana",
+            [{"value": "ana", "label": "first_name"}],
+            ["ana-lopez-fix", "author=ana"],
+            id="name_in_branch",
+        ),
+        pytest.param(
+            '{"user_id": "u-1", "host": "jsmith-laptop", "owner": "jsmith"}',
+            [{"value": "jsmith", "label": "user_name"}],
+            ["jsmith-laptop", '"jsmith"'],
+            id="username_in_hostname",
+        ),
+        pytest.param(
+            '{"file": "/home/u/resume-Lopez.pdf", "last_name": "Lopez"}',
+            [{"value": "Lopez", "label": "last_name"}],
+            ["resume-Lopez"],
+            id="surname_in_file_path",
+        ),
+        pytest.param(
+            'level=error svc=auth_api msg="lookup failed" id=internal-procID-id user=procID',
+            [{"value": "procID", "label": "unique_id"}],
+            ["internal-procID-id", "user=procID"],
+            id="issue_example_redacted_whole",
+        ),
+        pytest.param(
+            'level=error svc=auth_api msg="lookup failed" id=internal\u2011procID\u2011id user=procID',
+            [{"value": "procID", "label": "unique_id"}],
+            ["internal\u2011procID\u2011id"],
+            id="non_breaking_hyphen",
+        ),
     ],
 )
-def test_code_like_row_does_not_tag_value_inside_hyphenated_identifier(text: str, value: str, label: str) -> None:
-    detected = _run_detection_rows(text=text, augmented=[{"value": value, "label": label}])
+def test_code_like_row_redacts_value_next_to_hyphen(
+    text: str, augmented: list[dict[str, str]], must_redact: list[str]
+) -> None:
+    """Privacy direction: a value the augmenter flags stays redacted when a hyphen touches it."""
+    row = _run_detection_row(text=text, augmented=augmented)
+    assert row[COL_TEXT_IS_CODE_LIKE] is True
+    spans = [(e["start_position"], e["end_position"]) for e in row[COL_DETECTED_ENTITIES]["entities"]]
+    for fragment in must_redact:
+        # Strip the "key=" / quote context used to pick one occurrence; only the value must be covered.
+        value = fragment.split("=")[-1].strip('"')
+        start = text.index(fragment) + fragment.index(value)
+        assert any(s <= start and start + len(value) <= e for s, e in spans), (value, spans)
 
-    standalone = text.rindex(value)
-    assert [(e["start_position"], e["end_position"]) for e in detected if e["value"] == value] == [
-        (standalone, standalone + len(value))
-    ]
+
+def test_code_like_row_keeps_underscore_partial_token_rule() -> None:
+    """Underscore stays token-internal as on main, so a partial match inside one is not tagged."""
+    text = 'level=error svc=auth_api msg="lookup failed" id=internal_procID_id user=procID'
+    detected = _run_detection_rows(text=text, augmented=[{"value": "procID", "label": "unique_id"}])
+    assert [e["value"] for e in detected] == ["procID"]
 
 
 @pytest.mark.parametrize(
@@ -378,6 +445,10 @@ def test_code_like_row_keeps_hyphenated_number() -> None:
 
 
 def _run_detection_rows(*, text: str, augmented: list[dict[str, str]]) -> list[dict[str, Any]]:
+    return _run_detection_row(text=text, augmented=augmented)[COL_DETECTED_ENTITIES]["entities"]
+
+
+def _run_detection_row(*, text: str, augmented: list[dict[str, str]]) -> dict[str, Any]:
     """Drive a row through parse -> seed validation -> merge -> finalize with no detector hits."""
     row: dict[str, Any] = {COL_TEXT: text, COL_RAW_DETECTED: _raw([])}
     row = parse_detected_entities(row)
@@ -385,5 +456,4 @@ def _run_detection_rows(*, text: str, augmented: list[dict[str, str]]) -> list[d
     row = apply_validation_to_seed_entities(row)
     row[COL_AUGMENTED_ENTITIES] = {"entities": augmented}
     row = merge_and_build_candidates(row)
-    row = apply_validation_and_finalize(row)
-    return row[COL_DETECTED_ENTITIES]["entities"]
+    return apply_validation_and_finalize(row)

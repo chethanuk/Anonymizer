@@ -634,7 +634,7 @@ PARTIAL-TOKEN RULE (HARD DROP):
 - A contiguous token means adjacent letters, digits, or underscore with no whitespace boundary.
 - If characters immediately before or after the tagged span are alphanumeric, or underscore, the tag is a partial token and must be dropped.
 {%- if <<IS_CODE_LIKE>> %}
-- This input is code-like, so a hyphen also joins a token at a letter: "procID" inside "internal-procID-id" is a partial token and must be dropped. A hyphen next to a digit of the tagged value still separates, so "555-123-4567" inside "+1-555-123-4567" is not a partial token.
+- This input is code-like, but a hyphen does not make a tag a partial token: "ana" inside "ana-lopez-fix" or "A12345" inside "ID-A12345" must NOT be dropped for this rule. This covers "-", U+2010 and U+2011. The whole hyphen-joined token is redacted after validation.
 {%- endif %}
 - Example:
     {%- if <<TAG_NOTATION>> == "xml" -%}

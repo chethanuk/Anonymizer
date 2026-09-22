@@ -30,6 +30,7 @@ from anonymizer.engine.constants import (
     COL_TAG_NOTATION,
     COL_TAGGED_TEXT,
     COL_TEXT,
+    COL_TEXT_IS_CODE_LIKE,
     COL_VALIDATED_ENTITIES,
     COL_VALIDATED_SEED_ENTITIES,
     COL_VALIDATION_CANDIDATES,
@@ -44,7 +45,9 @@ from anonymizer.engine.detection.postprocess import (
     expand_entity_occurrences,
     filter_excluded_entity_spans,
     get_tag_notation,
+    is_code_like,
     parse_raw_entities,
+    widen_hyphen_compounds,
 )
 from anonymizer.engine.schemas import (
     EntitiesSchema,
@@ -57,7 +60,7 @@ from anonymizer.engine.schemas import (
 
 @custom_column_generator(
     required_columns=[COL_TEXT, COL_RAW_DETECTED],
-    side_effect_columns=[COL_TAG_NOTATION],
+    side_effect_columns=[COL_TAG_NOTATION, COL_TEXT_IS_CODE_LIKE],
 )
 def parse_detected_entities(row: dict[str, Any]) -> dict[str, Any]:
     """Parse detector payload and produce seed entities."""
@@ -69,6 +72,7 @@ def parse_detected_entities(row: dict[str, Any]) -> dict[str, Any]:
     seed_entities = [entity.as_dict() for entity in entities]
     row[COL_SEED_ENTITIES] = EntitiesSchema(entities=seed_entities).model_dump(mode="json")
     row[COL_TAG_NOTATION] = get_tag_notation(text=text)
+    row[COL_TEXT_IS_CODE_LIKE] = is_code_like(text)
     return row
 
 
@@ -172,7 +176,7 @@ def enrich_validation_decisions(row: dict[str, Any]) -> dict[str, Any]:
 
 
 @custom_column_generator(
-    required_columns=[COL_TEXT, COL_MERGED_ENTITIES, COL_VALIDATED_ENTITIES],
+    required_columns=[COL_TEXT, COL_MERGED_ENTITIES, COL_VALIDATED_ENTITIES, COL_TEXT_IS_CODE_LIKE],
     side_effect_columns=[COL_TAGGED_TEXT],
 )
 def apply_validation_and_finalize(
@@ -189,6 +193,9 @@ def apply_validation_and_finalize(
     )
     validated = filter_excluded_entity_spans(validated, excluded_entity_labels)
     expanded = expand_entity_occurrences(text=text, entities=validated)
+    if row.get(COL_TEXT_IS_CODE_LIKE, False):
+        # After validation, so the validator judges the same spans as on prose rows.
+        expanded = widen_hyphen_compounds(text=text, entities=expanded)
     row[COL_DETECTED_ENTITIES] = EntitiesSchema(entities=[entity.as_dict() for entity in expanded]).model_dump(
         mode="json"
     )

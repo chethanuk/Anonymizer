@@ -15,6 +15,20 @@ logger = logging.getLogger(__name__)
 
 VALIDATION_CONTEXT_WINDOW = 32
 
+# Hyphens that join a code token: ASCII, U+2010 and U+2011. En and em dashes separate clauses
+# and are never joiners.
+_HYPHENS = "-\u2010\u2011"
+
+# A whitespace token carrying any of these reads as code, logs or config rather than prose:
+# braces, backticks, backslashes, "::", a call "name(", a quoted JSON key '"key":', a file
+# path "/dir/file.ext", snake_case, or lowerCamelCase starting with two lowercase letters.
+# PascalCase or one-letter prefixes (McCarthy, DeShawn, MacBook, iPhone) are common in prose,
+# so they do not count.
+_CODE_MARK_RE = re.compile(r'[{}`\\]|::|\w\(|":|/\w+\.\w|[A-Za-z0-9]_[A-Za-z0-9]|(?<![A-Za-z])[a-z]{2,}[A-Z]')
+# An operator with no space on either side ("a=b", "a->b", "a<b", "a;b") is a weaker mark: notes
+# write "BP=120/80" or "Q3->Q4" too. It adds to the count but cannot make a row code-like alone.
+_OPERATOR_MARK_RE = re.compile(r"\S(?:=|<|>|;|->)\S")
+
 
 @dataclass(frozen=True)
 class EntitySpan:
@@ -332,6 +346,68 @@ def build_tagged_text(
 def get_tag_notation(text: str) -> str:
     """Return the tag notation name chosen for *text* (xml, bracket, paren, sentinel)."""
     return _choose_tag_notation(text).value
+
+
+def is_code_like(text: str) -> bool:
+    """Return True when *text* reads as code, logs or config rather than prose.
+
+    Counts whitespace tokens that carry a code mark (see ``_CODE_MARK_RE`` and
+    ``_OPERATOR_MARK_RE``) and needs at least two such tokens, a 20% share, and at least one
+    token with a strong mark. The share alone would flag a sentence that mentions a single
+    identifier; the count alone would flag a long document that quotes a few. It decides once
+    per row: a stack trace pasted into prose gets one answer for the whole row.
+
+    The answer only decides whether ``widen_hyphen_compounds`` runs, which never removes a
+    span. A wrong answer either way costs precision, not privacy.
+    """
+    # Emails and URLs show up in prose all the time; their "_" and "=" are not code marks.
+    tokens = [token for token in text.split() if "@" not in token and "://" not in token]
+    strong = sum(1 for token in tokens if _CODE_MARK_RE.search(token))
+    hits = strong + sum(1 for token in tokens if not _CODE_MARK_RE.search(token) and _OPERATOR_MARK_RE.search(token))
+    return strong >= 1 and hits >= 2 and hits >= 0.2 * len(text.split())
+
+
+def widen_hyphen_compounds(text: str, entities: list[EntitySpan]) -> list[EntitySpan]:
+    """Widen each span to the whole hyphen-joined token it sits in, for code-like text.
+
+    In code a hyphen joins a token: "ana" in "ana-lopez-fix" or "A12345" in "ID-A12345" is
+    part of one identifier. Redacting only the fragment leaves the rest of the identifier
+    ("Mary-Jane" -> "Susan-Jane") in the output, so the span grows to cover it. Spans are only
+    ever widened, never dropped. A hyphen next to a digit edge formats a number
+    ("+1-555-123-4567", "78701-1234"), so only letter edges widen.
+    """
+
+    def is_token_char(char: str) -> bool:
+        return char.isalnum() or char == "_"
+
+    widened: list[EntitySpan] = []
+    for entity in entities:
+        start, end = entity.start_position, entity.end_position
+        if text[start : start + 1].isalpha():
+            while start >= 2 and text[start - 1] in _HYPHENS and is_token_char(text[start - 2]):
+                start -= 1
+                while start > 0 and is_token_char(text[start - 1]):
+                    start -= 1
+        if text[end - 1 : end].isalpha():
+            while end + 1 < len(text) and text[end] in _HYPHENS and is_token_char(text[end + 1]):
+                end += 1
+                while end < len(text) and is_token_char(text[end]):
+                    end += 1
+        if (start, end) == (entity.start_position, entity.end_position):
+            widened.append(entity)
+            continue
+        widened.append(
+            EntitySpan(
+                entity_id=_build_entity_id(label=entity.label, start=start, end=end),
+                value=text[start:end],
+                label=entity.label,
+                start_position=start,
+                end_position=end,
+                score=entity.score,
+                source=entity.source,
+            )
+        )
+    return resolve_overlaps(widened)
 
 
 def expand_entity_occurrences(text: str, entities: list[EntitySpan]) -> list[EntitySpan]:

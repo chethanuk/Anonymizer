@@ -49,6 +49,7 @@ from anonymizer.engine.constants import (
     COL_SEED_VALIDATION_CANDIDATES,
     COL_TAG_NOTATION,
     COL_TEXT,
+    COL_TEXT_IS_CODE_LIKE,
     COL_VALIDATION_DECISIONS,
     COL_VALIDATION_SKELETON,
 )
@@ -231,6 +232,7 @@ def render_chunk_prompt(
     excerpt: str,
     skeleton: dict[str, Any],
     notation: TagNotation,
+    code_like: bool = False,
 ) -> str:
     """Render the validation prompt for a single chunk via Jinja2.
 
@@ -244,6 +246,7 @@ def render_chunk_prompt(
             COL_SEED_TAGGED_TEXT: excerpt,
             COL_VALIDATION_SKELETON: skeleton,
             COL_TAG_NOTATION: notation.value,
+            COL_TEXT_IS_CODE_LIKE: code_like,
         }
     )
 
@@ -464,6 +467,7 @@ def _build_dispatch_kwargs_per_chunk(
     seed_entities_schema = EntitiesSchema.from_raw(row.get(COL_SEED_ENTITIES, {}))
     notation_raw = row.get(COL_TAG_NOTATION) or TagNotation.sentinel.value
     notation = TagNotation(str(notation_raw))
+    code_like = bool(row.get(COL_TEXT_IS_CODE_LIKE, False))
 
     if not candidates.candidates:
         return candidates, []
@@ -534,6 +538,7 @@ def _build_dispatch_kwargs_per_chunk(
             excerpt=excerpt,
             skeleton=skeleton,
             notation=notation,
+            code_like=code_like,
         )
         # Round-robin across the validator pool. ``ChunkedValidationParams``
         # guarantees ``pool`` is non-empty; ``chunk_index`` comes from
@@ -641,6 +646,7 @@ def make_chunked_validation_generator(pool: list[str]) -> Any:
             COL_SEED_ENTITIES,
             COL_SEED_VALIDATION_CANDIDATES,
             COL_TAG_NOTATION,
+            COL_TEXT_IS_CODE_LIKE,
         ],
         model_aliases=list(pool),
     )

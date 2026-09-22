@@ -20,6 +20,7 @@ COL_SEED_ENTITIES = "_seed_entities"
 COL_INITIAL_TAGGED_TEXT = "_initial_tagged_text"
 COL_SEED_ENTITIES_JSON = "_seed_entities_json"
 COL_TAG_NOTATION = "_tag_notation"
+COL_TEXT_IS_CODE_LIKE = "_text_is_code_like"
 COL_VALIDATED_SEED_ENTITIES = "_validated_seed_entities"
 
 # Step 3: LLM augmentation

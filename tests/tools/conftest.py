@@ -20,6 +20,7 @@ WANDB_INGRESS_PATH = MEASUREMENT_ROOT / "measurement_tools/wandb_ingress.py"
 WANDB_COMPLETION_PATH = MEASUREMENT_ROOT / "measurement_tools/wandb_completion.py"
 WANDB_IMPORT_PATH = MEASUREMENT_ROOT / "import_wandb_run.py"
 WANDB_REPORT_PATH = MEASUREMENT_ROOT / "create_wandb_report.py"
+COMPARE_BENCHMARK_OUTPUT_PATH = MEASUREMENT_ROOT / "compare_benchmark_output.py"
 
 
 def _load_measurement_tool(
@@ -76,3 +77,10 @@ def wandb_import_tool(load_tool: Callable[..., ModuleType], request: pytest.Fixt
 @pytest.fixture
 def wandb_report_tool(load_tool: Callable[..., ModuleType], request: pytest.FixtureRequest) -> ModuleType:
     return _load_measurement_tool(load_tool, request, "measurement_wandb_report", WANDB_REPORT_PATH)
+
+
+@pytest.fixture
+def compare_benchmark_output_tool(load_tool: Callable[..., ModuleType], request: pytest.FixtureRequest) -> ModuleType:
+    return _load_measurement_tool(
+        load_tool, request, "measurement_compare_benchmark_output", COMPARE_BENCHMARK_OUTPUT_PATH
+    )

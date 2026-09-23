@@ -7,6 +7,7 @@ import functools
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, ClassVar, Literal
@@ -31,7 +32,13 @@ from anonymizer.config.rewrite import (
 )
 from anonymizer.engine.io.constants import SUPPORTED_IO_FORMATS
 from anonymizer.interface.anonymizer import Anonymizer
-from anonymizer.interface.cli._output import write_result
+from anonymizer.interface.cli._output import (
+    print_preview,
+    print_run_summary,
+    write_failed_records,
+    write_result,
+    write_trace,
+)
 from anonymizer.interface.errors import AnonymizerIOError, InvalidConfigError
 from anonymizer.logging import LoggingConfig, configure_logging
 
@@ -91,6 +98,15 @@ class CliOpts:
     ] = None
     verbose: bool = False
     debug: bool = False
+    color: Annotated[
+        bool,
+        cyclopts.Parameter(
+            help=(
+                "Style CLI output with ANSI colors when stdout is a terminal. "
+                "Use --no-color (or set NO_COLOR) to disable."
+            )
+        ),
+    ] = True
 
     # -- replace-specific --
     format_template: Annotated[
@@ -221,6 +237,18 @@ def _build_config_and_anonymizer(opts: CliOpts) -> tuple[AnonymizerConfig, Anony
     return config, anonymizer
 
 
+def _resolve_side_file(flag: str, value: str, taken: dict[str, Path]) -> Path:
+    """Validate an extra output path before the pipeline runs, so a bad path cannot waste a run."""
+    path = Path(value).resolve()
+    if path.suffix.lower() not in SUPPORTED_IO_FORMATS:
+        raise InvalidConfigError(f"Unsupported {flag} format: {path.suffix!r}. Use one of {SUPPORTED_IO_FORMATS}")
+    for other_flag, other in taken.items():
+        if path == other:
+            raise InvalidConfigError(f"{flag} path must differ from {other_flag}: {path}")
+    taken[flag] = path
+    return path
+
+
 def _configure_logging(opts: CliOpts) -> None:
     if opts.debug:
         configure_logging(LoggingConfig.debug())
@@ -242,6 +270,16 @@ def run(
             help="Output file path (.csv or .parquet). Defaults to source stem + _anonymized or _rewritten."
         ),
     ] = None,
+    trace: Annotated[
+        str | None,
+        cyclopts.Parameter(help="Also write the full pipeline trace dataset to this path (.csv or .parquet)."),
+    ] = None,
+    failed_output: Annotated[
+        str | None,
+        cyclopts.Parameter(
+            help="Also write failed records (record_id, step, reason) to this path (.csv or .parquet) for triage."
+        ),
+    ] = None,
 ) -> None:
     """Run the full anonymization pipeline (detection + replacement or rewrite)."""
     if output is None:
@@ -255,11 +293,24 @@ def run(
         )
     if output_path == Path(data.source).resolve():
         raise InvalidConfigError(f"Output path must differ from source: {output_path}")
+    taken = {"--source": Path(data.source).resolve(), "--output": output_path}
+    trace_path = _resolve_side_file("--trace", trace, taken) if trace is not None else None
+    failed_path = _resolve_side_file("--failed-output", failed_output, taken) if failed_output is not None else None
     _configure_logging(opts)
     config, anonymizer = _build_config_and_anonymizer(opts)
+    start = time.perf_counter()
     result = anonymizer.run(config=config, data=data)
+    elapsed = time.perf_counter() - start
     written = write_result(result, output)
-    print(f"Output written to: {written}")
+    print_run_summary(
+        result,
+        source=data.source,
+        output_path=written,
+        trace_path=write_trace(result, trace_path) if trace_path is not None else None,
+        failed_path=write_failed_records(result, failed_path) if failed_path is not None else None,
+        elapsed=elapsed,
+        color=opts.color,
+    )
 
 
 @app.command
@@ -274,7 +325,7 @@ def preview(
     _configure_logging(opts)
     config, anonymizer = _build_config_and_anonymizer(opts)
     result = anonymizer.preview(config=config, data=data, num_records=num_records)
-    print(result.dataframe.to_string(max_colwidth=80))
+    print_preview(result, color=opts.color)
 
 
 @app.command

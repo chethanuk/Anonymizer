@@ -135,6 +135,15 @@ Access the full pipeline trace with all internal columns.
 ```python
 preview.trace_dataframe
 ```
+Save a full run and load it back later, for example to pass it to `anonymizer.evaluate()`.
+```python
+from anonymizer.interface.results import AnonymizerResult
+
+output.write_artifacts("run_artifacts")
+loaded = AnonymizerResult.read_artifacts("run_artifacts")
+```
+The directory holds the result and trace as Parquet, the failed records, and a versioned `metadata.json` with the strategy and evaluation inputs.
+
 ---
 ## Telemetry and Privacy
 

@@ -170,6 +170,8 @@ def main() -> None:
         out_path = "output.parquet"  # TODO: change path/format (.csv, .jsonl) as needed
         result.dataframe.to_parquet(out_path)
         print(f"Wrote {len(result.dataframe)} rows to {out_path}")
+        # result + full trace + metadata; reload with AnonymizerResult.read_artifacts from anonymizer.interface.results
+        result.write_artifacts("output_artifacts")
     else:
         result = anonymizer.preview(config=config, data=data, num_records=args.num_records)
         print(f"Previewed {len(result.dataframe)} rows.")

@@ -246,6 +246,26 @@ def _prepare_rewrite_tagged_text(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def encode_skipped_span_label_counts(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Apply the Parquet-safe JSON-string encoding for persisting a trace.
+
+    Inverse of ``restore_empty_skipped_span_label_counts``. A ``{}`` count map has no
+    Arrow struct type, and mixing it with populated maps corrupts them on a Parquet
+    round trip, so the map is stored as a JSON string instead.
+
+    Args:
+        dataframe: Trace dataframe. It and its cell dicts are left unmodified.
+
+    Returns:
+        A copy of ``dataframe`` whose ``skipped_span_label_counts`` dicts are encoded
+        as JSON strings in new application dicts. Other values pass through unchanged.
+    """
+    encoded = dataframe.copy()
+    if COL_REPLACEMENT_APPLICATION in encoded.columns:
+        encoded[COL_REPLACEMENT_APPLICATION] = encoded[COL_REPLACEMENT_APPLICATION].map(_encode_application_counts)
+    return encoded
+
+
 def restore_empty_skipped_span_label_counts(dataframe: pd.DataFrame) -> None:
     """Undo the Parquet-safe JSON-string encoding written by ``_prepare_rewrite_tagged_text``.
 
@@ -265,6 +285,15 @@ def restore_empty_skipped_span_label_counts(dataframe: pd.DataFrame) -> None:
         return {**value, "skipped_span_label_counts": json.loads(counts)}
 
     dataframe[COL_REPLACEMENT_APPLICATION] = dataframe[COL_REPLACEMENT_APPLICATION].map(_restore)
+
+
+def _encode_application_counts(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    counts = value.get("skipped_span_label_counts")
+    if not isinstance(counts, dict):
+        return value
+    return {**value, "skipped_span_label_counts": json.dumps(counts, sort_keys=True)}
 
 
 def _replace_pairs(disposition_block: object) -> set[tuple[str, str]]:

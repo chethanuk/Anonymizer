@@ -390,4 +390,84 @@ def test_filter_replacement_map_empty_warning_does_not_leak_pii(
     assert "Replacement map empty after filtering" in caplog.text
     assert "first_name" in caplog.text
     _assert_no_pii_in_logs(caplog, extra_secrets=("Acme Corp", "NovaCorp"))
-    assert result == {"replacements": []}
+    assert result == {
+        "replacements": [
+            {"original": "Jane Doe", "label": "first_name", "synthetic": "[SUBSTITUTE_FIRST_NAME_1]"},
+        ]
+    }
+
+
+def test_filter_replacement_map_backfills_entities_the_llm_omitted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An entity the LLM left out gets a placeholder, so no span is left un-replaced."""
+    parsed_entities = EntitiesByValueSchema.model_validate(
+        {
+            "entities_by_value": [
+                {"value": "Jane Doe", "labels": ["first_name"]},
+                {"value": "jane.doe@example.com", "labels": ["email"]},
+                {"value": "12 Elm Street", "labels": ["street_address"]},
+                {"value": "34 Oak Avenue", "labels": ["street_address"]},
+            ]
+        }
+    )
+    raw_map = {
+        "replacements": [
+            {"original": "Jane Doe", "label": "first_name", "synthetic": "Maya Chen"},
+            {"original": "jane.doe@example.com", "label": "email", "synthetic": "maya.chen@example.com"},
+        ]
+    }
+
+    with caplog.at_level(logging.DEBUG, logger="anonymizer"):
+        result = _filter_replacement_map_to_input_entities(
+            raw_map=raw_map, parsed_entities=parsed_entities, record_id="row-backfill"
+        )
+
+    assert result == {
+        "replacements": [
+            {"original": "Jane Doe", "label": "first_name", "synthetic": "Maya Chen"},
+            {"original": "jane.doe@example.com", "label": "email", "synthetic": "maya.chen@example.com"},
+            {"original": "12 Elm Street", "label": "street_address", "synthetic": "[SUBSTITUTE_STREET_ADDRESS_1]"},
+            {"original": "34 Oak Avenue", "label": "street_address", "synthetic": "[SUBSTITUTE_STREET_ADDRESS_2]"},
+        ]
+    }
+    assert "unfilled_by_label={'street_address': 2}" in caplog.text
+    assert "backfilled_by_label={'street_address': 2}" in caplog.text
+    _assert_no_pii_in_logs(caplog, extra_secrets=("12 Elm Street", "34 Oak Avenue"))
+
+
+def test_filter_replacement_map_backfill_never_reuses_a_collision_placeholder(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A backfilled placeholder must not repeat one already used to repair a collision."""
+    parsed_entities = EntitiesByValueSchema.model_validate(
+        {
+            "entities_by_value": [
+                {"value": "1979-01-01", "labels": ["date"]},
+                {"value": "1980-02-02", "labels": ["date"]},
+                {"value": "1991-03-04", "labels": ["date"]},
+            ]
+        }
+    )
+    raw_map = {
+        "replacements": [
+            {"original": "1979-01-01", "label": "date", "synthetic": "1980-02-02"},
+            {"original": "1980-02-02", "label": "date", "synthetic": "2001-05-06"},
+        ]
+    }
+
+    with caplog.at_level(logging.WARNING, logger="anonymizer"):
+        result = _filter_replacement_map_to_input_entities(
+            raw_map=raw_map, parsed_entities=parsed_entities, record_id="row-collision-backfill"
+        )
+
+    assert result == {
+        "replacements": [
+            {"original": "1979-01-01", "label": "date", "synthetic": "[SUBSTITUTE_DATE_1]"},
+            {"original": "1980-02-02", "label": "date", "synthetic": "2001-05-06"},
+            {"original": "1991-03-04", "label": "date", "synthetic": "[SUBSTITUTE_DATE_2]"},
+        ]
+    }
+    synthetics = [entry["synthetic"] for entry in result["replacements"]]
+    assert len(set(synthetics)) == len(synthetics)
+    _assert_no_pii_in_logs(caplog, extra_secrets=("1979-01-01", "1980-02-02", "1991-03-04", "2001-05-06"))

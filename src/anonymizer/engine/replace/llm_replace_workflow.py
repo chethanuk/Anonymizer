@@ -146,7 +146,7 @@ def _filter_replacement_map_to_input_entities(
     parsed_entities: EntitiesByValueSchema,
     record_id: str = "",
 ) -> dict[str, list[dict[str, str]]]:
-    """Keep only replacement entries that correspond to actual requested entities."""
+    """Keep requested entries from the LLM map and backfill any it omitted."""
     if isinstance(raw_map, BaseModel):
         raw_map = raw_map.model_dump(mode="python")
     if not isinstance(raw_map, dict):
@@ -199,24 +199,42 @@ def _filter_replacement_map_to_input_entities(
             sum(synthetic_collision_labels.values()),
             dict(synthetic_collision_labels),
         )
+    llm_filled_pairs = set(seen)
+    # Some LLMs drop an entity on entity-dense records; an unfilled pair would leave the
+    # original text in place and mark the rewrite unavailable, so give it a placeholder.
+    avoid_values = protected_original_values | {entry["synthetic"] for entry in filtered}
+    backfilled_labels: Counter[str] = Counter()
+    for value, label in sorted(allowed_pairs - llm_filled_pairs):
+        backfilled_labels[label] += 1
+        synthetic = _collision_safe_synthetic(
+            label, index=backfilled_labels[label], protected_original_values=avoid_values
+        )
+        avoid_values.add(synthetic)
+        filtered.append({"original": value, "label": label, "synthetic": synthetic})
+    if backfilled_labels:
+        logger.warning(
+            "Replacement map backfilled LLM-omitted entries for record %s; backfilled=%d (backfilled_by_label=%s)",
+            record_id or "<unknown>",
+            sum(backfilled_labels.values()),
+            dict(backfilled_labels),
+        )
     if logger.isEnabledFor(logging.DEBUG):
         raw_pairs = {(r.original, r.label) for r in parsed_map.replacements}
-        filtered_pairs = {(f["original"], f["label"]) for f in filtered}
         unrequested_labels = Counter(label for _, label in (raw_pairs - allowed_pairs))
-        unfilled_labels = Counter(label for _, label in (allowed_pairs - filtered_pairs))
+        unfilled_labels = Counter(label for _, label in (allowed_pairs - llm_filled_pairs))
         logger.debug(
             "Replacement map record %s: requested=%d raw=%d filtered=%d%s%s%s",
             record_id or "<unknown>",
             len(allowed_pairs),
             len(parsed_map.replacements),
-            len(filtered),
+            len(llm_filled_pairs),
             f" unrequested_by_label={dict(unrequested_labels)}" if unrequested_labels else "",
             f" unfilled_by_label={dict(unfilled_labels)}" if unfilled_labels else "",
             f" synthetic_original_collision_by_label={dict(synthetic_collision_labels)}"
             if synthetic_collision_labels
             else "",
         )
-    if not filtered and allowed_pairs:
+    if not llm_filled_pairs and allowed_pairs:
         requested_labels = Counter(label for _, label in allowed_pairs)
         logger.warning(
             "Replacement map empty after filtering for record %s; requested=%d raw=%d (requested_by_label=%s)",

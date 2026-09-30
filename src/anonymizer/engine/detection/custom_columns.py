@@ -47,6 +47,7 @@ from anonymizer.engine.detection.postprocess import (
     normalize_label,
     normalize_labels,
     parse_raw_entities,
+    widen_hyphen_compounds,
 )
 from anonymizer.engine.schemas import (
     EntitiesSchema,
@@ -195,6 +196,8 @@ def apply_validation_and_finalize(
         validated = [entity for entity in validated if normalize_label(entity.label) in allowed]
     validated = filter_excluded_entity_spans(validated, excluded_entity_labels)
     expanded = expand_entity_occurrences(text=text, entities=validated)
+    # After validation, so the validator judges the same spans it always did.
+    expanded = widen_hyphen_compounds(text=text, entities=expanded)
     row[COL_DETECTED_ENTITIES] = EntitiesSchema(entities=[entity.as_dict() for entity in expanded]).model_dump(
         mode="json"
     )

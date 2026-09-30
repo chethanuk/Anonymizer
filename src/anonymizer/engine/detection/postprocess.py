@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 
 VALIDATION_CONTEXT_WINDOW = 32
 
+# Hyphens that join a code token: ASCII, U+2010 and U+2011. En and em dashes separate clauses
+# and are never joiners.
+_HYPHENS = "-\u2010\u2011"
+
 
 @dataclass(frozen=True)
 class EntitySpan:
@@ -332,6 +336,74 @@ def build_tagged_text(
 def get_tag_notation(text: str) -> str:
     """Return the tag notation name chosen for *text* (xml, bracket, paren, sentinel)."""
     return _choose_tag_notation(text).value
+
+
+def widen_hyphen_compounds(text: str, entities: list[EntitySpan]) -> list[EntitySpan]:
+    """Widen each span to the whole hyphen-joined token it sits in.
+
+    "ana" in "ana-lopez-fix" or "A12345" in "ID-A12345" is part of one identifier. Redacting
+    only the fragment leaves the rest of it ("Mary-Jane" -> "Susan-Jane") in the output, so the
+    span grows to cover it. Prose widens too ("pre-Austin"), which over-redacts a prefix. A span
+    is not widened when that would partly overlap another span, or reach a span with a different
+    label ("Ana-555-1234" with a phone number), so coverage never shrinks and labels never merge.
+    Same-label spans in one compound merge. Only the span's own edge must be a letter: widening
+    then continues through digit segments ("Mary-2024-03-15" widens whole). A span whose edge is a
+    digit never widens ("+1-555-123-4567", "78701-1234"), so "ID-A12345-5551234" keeps its tail.
+    """
+
+    ranges: list[tuple[int, int]] = []
+    for entity in entities:
+        start, end = entity.start_position, entity.end_position
+        if text[start : start + 1].isalpha():
+            while start >= 2 and text[start - 1] in _HYPHENS and _is_token_char(text[start - 2]):
+                start -= 1
+                while start > 0 and _is_token_char(text[start - 1]):
+                    start -= 1
+        if text[end - 1 : end].isalpha():
+            while end + 1 < len(text) and text[end] in _HYPHENS and _is_token_char(text[end + 1]):
+                end += 1
+                while end < len(text) and _is_token_char(text[end]):
+                    end += 1
+        ranges.append((start, end))
+
+    originals = [(entity.start_position, entity.end_position) for entity in entities]
+    widened: list[EntitySpan] = []
+    for idx, entity in enumerate(entities):
+        start, end = ranges[idx]
+        if (start, end) != originals[idx]:
+            # A partial overlap would make resolve_overlaps drop one span and unredact part of it, and
+            # a different-label span inside the range would be swallowed and take this span's label.
+            # The span's own original and range contain each other, so they never count.
+            others = [i for i in range(len(entities)) if i != idx]
+            if any(_partly_overlaps((start, end), r) for i in others for r in (originals[i], ranges[i])) or any(
+                entities[i].label != entity.label and start < originals[i][1] and originals[i][0] < end for i in others
+            ):
+                start, end = originals[idx]
+        if (start, end) == (entity.start_position, entity.end_position):
+            widened.append(entity)
+            continue
+        widened.append(
+            EntitySpan(
+                entity_id=_build_entity_id(label=entity.label, start=start, end=end),
+                value=text[start:end],
+                label=entity.label,
+                start_position=start,
+                end_position=end,
+                score=entity.score,
+                source=entity.source,
+            )
+        )
+    return resolve_overlaps(widened)
+
+
+def _is_token_char(char: str) -> bool:
+    return char.isalnum() or char == "_"
+
+
+def _partly_overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    """True when the ranges intersect but neither contains the other."""
+    overlap = a[0] < b[1] and b[0] < a[1]
+    return overlap and not (a[0] <= b[0] and b[1] <= a[1]) and not (b[0] <= a[0] and a[1] <= b[1])
 
 
 def expand_entity_occurrences(text: str, entities: list[EntitySpan]) -> list[EntitySpan]:

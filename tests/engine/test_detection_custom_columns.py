@@ -11,7 +11,10 @@ tricky strings and edge cases that real detector output produces.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+
+import pytest
 
 from anonymizer.engine.constants import (
     COL_AUGMENTED_ENTITIES,
@@ -357,3 +360,105 @@ def test_apply_validation_and_finalize_handles_malformed_merged_entities() -> No
 
     result = apply_validation_and_finalize(row)
     assert result[COL_DETECTED_ENTITIES] == {"entities": []}
+
+
+def _fv(value: str, label: str = "first_name") -> dict[str, str]:
+    return {"value": value, "label": label}
+
+
+@pytest.mark.parametrize(
+    ("text", "augmented", "expected"),
+    [
+        pytest.param("name=Mary-Jane", [_fv("Mary")], ["Mary-Jane"], id="compound_first_name"),
+        pytest.param(
+            "Mary said Mary-Jane Smith left.", [_fv("Mary")], ["Mary", "Mary-Jane"], id="prose_widens_second_only"
+        ),
+        pytest.param(
+            "id=internal-procID-id", [_fv("procID", "unique_id")], ["internal-procID-id"], id="issue_example_token"
+        ),
+        pytest.param(
+            "id=internal\u2011procID\u2011id",
+            [_fv("procID", "unique_id")],
+            ["internal\u2011procID\u2011id"],
+            id="non_breaking_hyphen",
+        ),
+        pytest.param("level=info host=ana-laptop user=ana", [_fv("ana")], ["ana-laptop", "ana"], id="logfmt_hostname"),
+        pytest.param('{"host":"ana-laptop","user":"ana"}', [_fv("ana")], ["ana-laptop", "ana"], id="minified_json"),
+        pytest.param("host: ana-laptop\nowner: ana", [_fv("ana")], ["ana-laptop", "ana"], id="yaml"),
+        pytest.param("x=Zo\u00eb-Ana", [_fv("Zo\u00eb")], ["Zo\u00eb-Ana"], id="non_ascii_letter_edge"),
+        pytest.param("x=Mary\u2010Jane", [_fv("Mary")], ["Mary\u2010Jane"], id="u2010_hyphen"),
+        pytest.param("slug=ana-lopez", [_fv("ana"), _fv("lopez")], ["ana-lopez"], id="same_label_parts_merge"),
+        pytest.param(
+            "slug=ana-lopez",
+            [_fv("ana"), _fv("lopez", "last_name")],
+            ["ana", "lopez"],
+            id="different_label_parts_stay_apart",
+        ),
+        pytest.param(
+            "call Ana-555-1234 now",
+            [_fv("Ana"), _fv("555-1234", "phone_number")],
+            ["Ana", "555-1234"],
+            id="name_next_to_phone",
+        ),
+        pytest.param(
+            "contact: ana-555-123-4567",
+            [_fv("ana"), _fv("555-123-4567", "phone_number")],
+            ["ana", "555-123-4567"],
+            id="name_next_to_long_phone",
+        ),
+        pytest.param(
+            "user=Smith-1234",
+            [_fv("Smith", "last_name"), _fv("1234", "pin")],
+            ["Smith", "1234"],
+            id="last_name_next_to_pin",
+        ),
+        pytest.param(
+            '"contact": "555 123 4567-ana"',
+            [_fv("555 123 4567", "phone_number"), _fv("ana")],
+            ["555 123 4567", "ana"],
+            id="digit_edge_neighbour_on_left",
+        ),
+        pytest.param("run --ana --user=ana", [_fv("ana")], ["ana", "ana"], id="flag_dashes_unchanged"),
+        pytest.param(
+            "phone=+1-555-123-4567 zip=78701-1234",
+            [_fv("555-123-4567", "phone_number"), _fv("78701", "postcode")],
+            ["555-123-4567", "78701"],
+            id="numeric_hyphens_unchanged",
+        ),
+        pytest.param("id=internal_procID_id", [_fv("procID", "unique_id")], [], id="underscore_partial_dropped"),
+        pytest.param(
+            "The pre-Austin move ended in Austin.",
+            [_fv("Austin", "city")],
+            ["pre-Austin", "Austin"],
+            id="accepted_prefix_over_redaction",
+        ),
+        pytest.param(
+            '{"contact":"ana-555 123 4567"}',
+            [_fv("ana"), _fv("555 123 4567", "phone_number")],
+            ["ana", "555 123 4567"],
+            id="partial_overlap_keeps_both",
+        ),
+    ],
+)
+def test_detected_span_widens_to_whole_hyphen_joined_token(
+    text: str, augmented: list[dict[str, str]], expected: list[str]
+) -> None:
+    detected = _run_detection_row(text=text, augmented=augmented)[COL_DETECTED_ENTITIES]["entities"]
+
+    assert [e["value"] for e in sorted(detected, key=lambda e: e["start_position"])] == expected
+    # Widening never uncovers a character the plain occurrences of the detected values covered.
+    covered = {i for e in detected for i in range(e["start_position"], e["end_position"])}
+    for item in augmented:
+        for m in re.finditer(rf"(?<![\w]){re.escape(item['value'])}", text):
+            assert set(range(m.start(), m.end())) <= covered
+
+
+def _run_detection_row(*, text: str, augmented: list[dict[str, str]]) -> dict[str, Any]:
+    """Drive a row through parse -> seed validation -> merge -> finalize with no detector hits."""
+    row: dict[str, Any] = {COL_TEXT: text, COL_RAW_DETECTED: _raw([])}
+    row = parse_detected_entities(row)
+    row[COL_VALIDATED_ENTITIES] = {"decisions": []}
+    row = apply_validation_to_seed_entities(row)
+    row[COL_AUGMENTED_ENTITIES] = {"entities": augmented}
+    row = merge_and_build_candidates(row)
+    return apply_validation_and_finalize(row)

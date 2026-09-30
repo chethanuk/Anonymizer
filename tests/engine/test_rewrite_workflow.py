@@ -1187,3 +1187,62 @@ def test_run_needs_human_review_not_overwritten_by_evaluate(
     )
 
     assert bool(result.dataframe[COL_NEEDS_HUMAN_REVIEW].iloc[0]) is True
+
+
+@pytest.mark.parametrize(
+    ("risk_tolerance", "any_high_leaked", "leakage_mass", "utility_score", "expected_review"),
+    [
+        pytest.param("low", True, 0.96, 0.97, False, id="high_leak_alone_does_not_flag"),
+        pytest.param("low", True, 2.5, 0.97, True, id="leakage_above_threshold_flags"),
+        pytest.param("low", True, 0.96, 0.4, True, id="utility_below_threshold_flags"),
+        pytest.param("low", True, 0.96, 0.5, False, id="utility_exactly_at_threshold_does_not_flag"),
+        pytest.param("low", True, 2.0, 0.97, False, id="leakage_exactly_at_threshold_does_not_flag"),
+        pytest.param("low", False, 2.5, 0.97, True, id="leakage_above_threshold_flags_without_high_leak"),
+        pytest.param("low", False, 0.1, 0.9, False, id="passing_row_not_flagged"),
+        # ``high`` has repair_any_high_leak=False, so this leak is neither repaired nor flagged;
+        # it surfaces only through the any_high_leaked column.
+        pytest.param("high", True, 1.5, 0.9, False, id="high_preset_high_leak_not_flagged"),
+        pytest.param("high", True, 3.5, 0.9, True, id="high_preset_leakage_above_threshold_flags"),
+    ],
+)
+def test_run_needs_human_review_uses_threshold_metrics_only(
+    stub_model_configs: list[ModelConfig],
+    stub_rewrite_model_selection: RewriteModelSelection,
+    stub_replace_model_selection: ReplaceModelSelection,
+    stub_df_with_entities: pd.DataFrame,
+    stub_replace_df: pd.DataFrame,
+    stub_pipeline_df: pd.DataFrame,
+    stub_eval_df: pd.DataFrame,
+    risk_tolerance: str,
+    any_high_leaked: bool,
+    leakage_mass: float,
+    utility_score: float,
+    expected_review: bool,
+) -> None:
+    """A single high-sensitivity leak must not flag a row whose metrics are inside thresholds.
+
+    ``low`` flags at utility < 0.5 or leakage > 2.0; ``high`` at utility < 0.3 or leakage > 3.0.
+    """
+    eval_df = stub_eval_df.copy()
+    eval_df[COL_ANY_HIGH_LEAKED] = any_high_leaked
+    eval_df[COL_LEAKAGE_MASS] = leakage_mass
+    eval_df[COL_UTILITY_SCORE] = utility_score
+
+    adapter = Mock()
+    adapter.run_workflow.side_effect = _standard_side_effect(stub_pipeline_df, eval_df)
+
+    with patch(_REPLACE_PATCH) as mock_replace_cls:
+        _mock_replace(mock_replace_cls, stub_replace_df)
+        result = RewriteWorkflow(adapter=adapter).run(
+            stub_df_with_entities,
+            model_configs=stub_model_configs,
+            selected_models=stub_rewrite_model_selection,
+            replace_model_selection=stub_replace_model_selection,
+            privacy_goal=_PRIVACY_GOAL,
+            evaluation=EvaluationCriteria(risk_tolerance=risk_tolerance, max_repair_iterations=0),
+        )
+
+    row = result.dataframe.iloc[0]
+    assert bool(row[COL_NEEDS_HUMAN_REVIEW]) is expected_review
+    # The signal stays a user-facing output column; only its use as a review gate is removed.
+    assert bool(row[COL_ANY_HIGH_LEAKED]) is any_high_leaked

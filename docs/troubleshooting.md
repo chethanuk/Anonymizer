@@ -184,7 +184,7 @@ Three failure modes look the same in the column:
 
 | Cause | Diagnosis |
 |---|---|
-| Leakage too high | `weighted_leakage_rate` near 1, or `any_high_leaked=True` |
+| Leakage too high | `leakage_mass` above `flag_leakage_above` for your tolerance (see [Risk tolerance](concepts/rewrite.md#risk-tolerance)) |
 | Utility too low | `utility_score` below `flag_utility_below` for your tolerance |
 | Both | Almost always means `protect` and `preserve` are pulling in opposite directions |
 

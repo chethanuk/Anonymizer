@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
 from pydantic import ValidationError
@@ -19,6 +21,8 @@ from anonymizer.interface.errors import AnonymizerIOError, InvalidInputError
 _WRITERS = {
     ".csv": lambda df, p: df.to_csv(p, index=False),
     ".parquet": lambda df, p: df.to_parquet(p, index=False),
+    ".json": lambda df, p: df.to_json(p, orient="records"),
+    ".jsonl": lambda df, p: df.to_json(p, orient="records", lines=True),
 }
 
 
@@ -48,6 +52,20 @@ def test_write_output_parquet_roundtrips(stub_dataframe: pd.DataFrame, tmp_path:
     assert loaded[COL_TEXT].tolist() == stub_dataframe[COL_TEXT].tolist()
 
 
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+def test_write_output_json_roundtrips(suffix: str, stub_dataframe: pd.DataFrame, tmp_path: Path) -> None:
+    out_path = tmp_path / f"out{suffix}"
+    write_output(stub_dataframe, out_path)
+    # The writer used to fall through to to_parquet for every non-csv suffix, so a .json
+    # path silently received parquet bytes.  Check the magic number, not just readability.
+    assert not out_path.read_bytes().startswith(b"PAR1")
+    loaded = pd.read_json(out_path, lines=suffix == ".jsonl")
+    assert loaded[COL_TEXT].tolist() == stub_dataframe[COL_TEXT].tolist()
+    if suffix == ".jsonl":
+        # One JSON object per line is what a wrong ``orient`` breaks.
+        assert len(out_path.read_text().splitlines()) == len(stub_dataframe)
+
+
 def test_write_output_unsupported_format_raises(stub_dataframe: pd.DataFrame, tmp_path: Path) -> None:
     with pytest.raises(InvalidInputError, match="Unsupported output format"):
         write_output(stub_dataframe, tmp_path / "out.xlsx")
@@ -58,6 +76,8 @@ def test_write_output_unsupported_format_raises(stub_dataframe: pd.DataFrame, tm
     [
         (".csv", lambda df, p: df.to_csv(p, index=False)),
         (".parquet", lambda df, p: df.to_parquet(p, index=False)),
+        (".json", lambda df, p: df.to_json(p, orient="records")),
+        (".jsonl", lambda df, p: df.to_json(p, orient="records", lines=True)),
     ],
 )
 def test_read_input_from_file(suffix: str, writer: Any, tmp_path: Path) -> None:
@@ -115,7 +135,7 @@ def test_read_input_from_remote_csv_url_with_fragment(monkeypatch: pytest.Monkey
 
 
 def test_read_input_remote_url_with_unsupported_format_raises() -> None:
-    inp = AnonymizerInput(source="https://example.com/data.json")
+    inp = AnonymizerInput(source="https://example.com/data.xlsx")
     with pytest.raises(InvalidInputError, match="Unsupported input format"):
         read_input(inp)
 
@@ -323,8 +343,8 @@ def test_read_input_non_colliding_columns_pass(tmp_path: Path) -> None:
 
 
 def test_read_input_unsupported_format_raises(tmp_path: Path) -> None:
-    file_path = tmp_path / "data.json"
-    file_path.write_text('{"a":[1]}')
+    file_path = tmp_path / "data.xlsx"
+    file_path.write_text("not a spreadsheet")
     inp = AnonymizerInput(source=str(file_path))
     with pytest.raises(InvalidInputError, match="Unsupported input format"):
         read_input(inp)
@@ -478,3 +498,108 @@ def test_read_input_empty_parquet_returns_empty(tmp_path: Path) -> None:
     result = read_input(inp, nrows=5)
     assert len(result.dataframe) == 0
     assert COL_TEXT in result.dataframe.columns
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+@pytest.mark.parametrize("nrows,expected", [(-1, 0), (0, 0), (1, 1), (None, 3)])
+def test_read_input_json_nrows_slices_and_keeps_columns(
+    suffix: str, nrows: int | None, expected: int, tmp_path: Path
+) -> None:
+    """nrows must slice and must never cost the caller the column schema.
+
+    ``pd.read_json(lines=True, nrows=0)`` reads the whole file rather than nothing, and
+    ``pd.read_json`` rejects nrows outright without ``lines=True`` -- both would be silent
+    wrong answers here.
+    """
+    inp = _write_input(pd.DataFrame({"text": ["Alice", "Bob", "Cara"]}), tmp_path, suffix)
+    result = read_input(inp, nrows=nrows)
+    assert len(result.dataframe) == expected
+    assert COL_TEXT in result.dataframe.columns
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+def test_json_roundtrip_keeps_string_passthrough_columns(suffix: str, tmp_path: Path) -> None:
+    """JSON carries its own types; zero-padded ids and date-named strings must survive unchanged."""
+    record = {"id": "007", "text": "Alice lives here", "updated_at": "2020-01-01", "zip": "02139"}
+    inp = _write_input(pd.DataFrame([record]), tmp_path, suffix)
+    out_path = write_output(read_input(inp).dataframe.rename(columns={COL_TEXT: "text"}), tmp_path / f"out{suffix}")
+    text = out_path.read_text(encoding="utf-8")
+    written = [json.loads(line) for line in text.splitlines()] if suffix == ".jsonl" else json.loads(text)
+    assert written == [record]
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+@pytest.mark.parametrize("value", [0.8333333333333334, 1.5e-12, 1.2345678901234567e-8, 123456.78901234567])
+def test_json_roundtrip_keeps_float_columns_exact(suffix: str, value: float, tmp_path: Path) -> None:
+    """Float outputs such as utility_score must round-trip bit-exact, as they do through csv and parquet."""
+    out_path = write_output(pd.DataFrame({"text": ["Alice"], "score": [value]}), tmp_path / f"out{suffix}")
+    loaded = read_input(AnonymizerInput(source=str(out_path))).dataframe
+    assert loaded["score"].tolist() == [value]
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+def test_write_output_json_writes_iso_dates(suffix: str, tmp_path: Path) -> None:
+    df = pd.DataFrame({"text": ["Alice"], "seen": pd.to_datetime(["2020-01-01"])})
+    out_path = write_output(df, tmp_path / f"out{suffix}")
+    assert "2020-01-01T00:00:00" in out_path.read_text()
+
+
+@pytest.mark.parametrize("nrows", [0, 1])
+def test_read_input_jsonl_preview_finds_text_column_in_later_record(nrows: int, tmp_path: Path) -> None:
+    """Preview reads only the first records; a ragged file must not fail where a full read succeeds."""
+    file_path = tmp_path / "ragged.jsonl"
+    file_path.write_text('{"id":"a"}\n{"id":"b","text":"Bob"}\n')
+    result = read_input(AnonymizerInput(source=str(file_path)), nrows=nrows)
+    assert len(result.dataframe) == nrows
+    assert COL_TEXT in result.dataframe.columns
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+@pytest.mark.parametrize(
+    "column",
+    [
+        pd.Series([0.5, np.nan], dtype="float64"),
+        pd.Series([1, pd.NA], dtype="Int64"),
+    ],
+    ids=["float-nan", "nullable-int-na"],
+)
+def test_write_output_json_writes_missing_values_as_null(suffix: str, column: pd.Series, tmp_path: Path) -> None:
+    out_path = write_output(pd.DataFrame({"text": ["a", "b"], "v": column}), tmp_path / f"out{suffix}")
+    text = out_path.read_text(encoding="utf-8")
+    records = [json.loads(line) for line in text.splitlines()] if suffix == ".jsonl" else json.loads(text)
+    assert records[1]["v"] is None
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+@pytest.mark.parametrize(
+    "cell",
+    [float("inf"), float("-inf"), [1.0, float("nan")], {"score": float("nan")}],
+    ids=["inf", "-inf", "nested-nan-list", "nested-nan-dict"],
+)
+def test_write_output_json_rejects_non_finite_values(suffix: str, cell: object, tmp_path: Path) -> None:
+    with pytest.raises(AnonymizerIOError, match="NaN/inf"):
+        write_output(pd.DataFrame({"text": ["a"], "v": [cell]}), tmp_path / f"out{suffix}")
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+def test_write_output_json_rejects_duplicate_column_names(suffix: str, tmp_path: Path) -> None:
+    """to_dict would silently keep only one of two same-named columns."""
+    with pytest.raises(AnonymizerIOError, match="unique"):
+        write_output(pd.DataFrame([["a", "b"]], columns=["text", "text"]), tmp_path / f"out{suffix}")
+
+
+@pytest.mark.parametrize("nrows", [None, 1])
+def test_read_input_jsonl_accepts_utf8_bom(nrows: int | None, tmp_path: Path) -> None:
+    file_path = tmp_path / "bom.jsonl"
+    file_path.write_bytes(b'\xef\xbb\xbf{"text":"Zo\xc3\xab"}\n{"text":"Bob"}\n')
+    result = read_input(AnonymizerInput(source=str(file_path)), nrows=nrows)
+    assert result.dataframe[COL_TEXT].iloc[0] == "Zoë"
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+def test_write_output_json_keeps_non_ascii_text_readable(suffix: str, tmp_path: Path) -> None:
+    df = pd.DataFrame({"text": ["Zoë", "东京 Tokyo"]})
+    out_path = write_output(df, tmp_path / f"out{suffix}")
+    assert "\\u" not in out_path.read_text(encoding="utf-8")
+    loaded = read_input(AnonymizerInput(source=str(out_path))).dataframe
+    assert loaded[COL_TEXT].tolist() == ["Zoë", "东京 Tokyo"]

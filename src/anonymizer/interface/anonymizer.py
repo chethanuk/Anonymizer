@@ -418,7 +418,15 @@ class Anonymizer:
             evaluated = anonymizer.evaluate(preview)
             evaluated.display_record(0)
 
-        Save/reload across sessions::
+        Save/reload a ``run()`` result across sessions::
+
+            result.write_artifacts("run_artifacts")
+            # … later …
+            loaded = AnonymizerResult.read_artifacts("run_artifacts")
+            evaluated = anonymizer.evaluate(loaded)
+
+        ``preview()`` results have no artifact methods, but the ``AnonymizerResult`` returned
+        by ``evaluate(preview)`` does. To save a ``preview()`` result itself, pickle it::
 
             import pickle
 

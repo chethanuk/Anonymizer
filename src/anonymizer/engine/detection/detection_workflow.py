@@ -257,6 +257,7 @@ class EntityDetectionWorkflow:
                     name=COL_MERGED_ENTITIES,
                     operation=DetectionTransformOperation.MERGE_AND_BUILD_CANDIDATES,
                     excluded_entity_labels=list(excluded_entity_labels or []),
+                    allowed_entity_labels=labels if label_config.strict_labels else None,
                 ),
                 DetectionTransformConfig(
                     name=COL_DETECTED_ENTITIES,

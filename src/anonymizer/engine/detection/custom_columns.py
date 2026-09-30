@@ -82,6 +82,7 @@ def merge_and_build_candidates(
     row: dict[str, Any],
     *,
     excluded_entity_labels: list[str] | None = None,
+    allowed_entity_labels: list[str] | None = None,
 ) -> dict[str, Any]:
     """Merge validated seed + augmented entities, then build tagged text and validation candidates.
 
@@ -96,6 +97,7 @@ def merge_and_build_candidates(
         entities=seed_spans,
         augmented_output=row.get(COL_AUGMENTED_ENTITIES, {}),
         excluded_entity_labels=set(excluded_entity_labels or []),
+        allowed_entity_labels=None if allowed_entity_labels is None else set(allowed_entity_labels),
     )
     merged_entities = [entity.as_dict() for entity in merged]
     row[COL_MERGED_ENTITIES] = EntitiesSchema(entities=merged_entities).model_dump(mode="json")

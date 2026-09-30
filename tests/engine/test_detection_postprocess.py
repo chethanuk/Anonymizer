@@ -21,6 +21,7 @@ from anonymizer.engine.detection.postprocess import (
     normalize_labels,
     parse_raw_entities,
     resolve_overlaps,
+    widen_hyphen_compounds,
 )
 
 
@@ -741,3 +742,88 @@ def test_parse_raw_entities_logs_warning_on_malformed_json(caplog: pytest.LogCap
     assert any("Failed to parse JSON" in m for m in caplog.messages)
     assert any("length=" in m for m in caplog.messages)
     assert payload not in "\n".join(caplog.messages)
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "expected"),
+    [
+        pytest.param("id=internal\u2010procID\u2010id", "procID", "internal\u2010procID\u2010id", id="u2010_joins"),
+        pytest.param("id=internal\u2013procID\u2013id", "procID", "procID", id="en_dash_separates"),
+        pytest.param("ref=ID-A12345", "A12345", "ID-A12345", id="letter_edge_left"),
+        pytest.param("plate=ABC-1234", "ABC", "ABC-1234", id="letter_edge_right"),
+        pytest.param("user-jsmith-42", "jsmith", "user-jsmith-42", id="username_segment"),
+        pytest.param("https://example.com/users/ana-lopez", "ana", "ana-lopez", id="url_segment"),
+        pytest.param(
+            "id 123e4567-e89b-12d3-a456-426614174000", "e89b", "123e4567-e89b-12d3-a456-426614174000", id="uuid"
+        ),
+        pytest.param("phone=+1-555-123-4567", "555-123-4567", "555-123-4567", id="digit_edge_phone"),
+        pytest.param("zip=78701-1234", "78701", "78701", id="digit_edge_zip"),
+        pytest.param("to ana- and", "ana", "ana", id="dangling_hyphen"),
+        pytest.param("flag --ana", "ana", "ana", id="double_hyphen_prefix"),
+    ],
+)
+def test_widen_hyphen_compounds_covers_whole_token(text: str, value: str, expected: str) -> None:
+    start = text.index(value)
+    entities = [EntitySpan("e1", value, "unique_id", start, start + len(value), 0.9, "detector")]
+    widened = widen_hyphen_compounds(text=text, entities=entities)
+    assert [e.value for e in widened] == [expected]
+    assert [text[e.start_position : e.end_position] for e in widened] == [expected]
+
+
+def test_widen_hyphen_compounds_merges_same_label_parts_of_one_compound() -> None:
+    text = "slug=ana-lopez"
+    entities = [
+        EntitySpan("a", "ana", "first_name", 5, 8, 1.0, "name_split"),
+        EntitySpan("b", "lopez", "first_name", 9, 14, 1.0, "name_split"),
+    ]
+    assert [(e.value, e.label) for e in widen_hyphen_compounds(text=text, entities=entities)] == [
+        ("ana-lopez", "first_name")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "spans"),
+    [
+        pytest.param("call Ana-555-1234 now", [("Ana", "first_name"), ("555-1234", "phone_number")], id="name_phone"),
+        pytest.param(
+            "contact: ana-555-123-4567",
+            [("ana", "first_name"), ("555-123-4567", "phone_number")],
+            id="name_phone_long",
+        ),
+        pytest.param("user=Smith-1234", [("Smith", "last_name"), ("1234", "pin")], id="last_name_pin"),
+        pytest.param("slug=ana-lopez", [("ana", "first_name"), ("lopez", "last_name")], id="name_parts"),
+    ],
+)
+def test_widen_hyphen_compounds_keeps_spans_with_different_labels_apart(
+    text: str, spans: list[tuple[str, str]]
+) -> None:
+    entities = []
+    for idx, (value, label) in enumerate(spans):
+        start = text.index(value)
+        entities.append(EntitySpan(f"e{idx}", value, label, start, start + len(value), 1.0, "augmenter"))
+
+    widened = widen_hyphen_compounds(text=text, entities=entities)
+
+    assert [(e.value, e.label) for e in widened] == spans
+
+
+@pytest.mark.parametrize(
+    ("text", "values"),
+    [
+        pytest.param('"contact": "ana-555 123 4567"', ["ana", "555 123 4567"], id="digit_edge_neighbour_crosses_space"),
+        pytest.param("addr=Oak-12 Baker Street", ["Oak", "12 Baker Street"], id="address_after_hyphen"),
+        pytest.param("x-1a-b1-y", ["1a", "b1"], id="one_sided_widenings_in_one_compound"),
+        pytest.param('"contact": "555 123 4567-ana"', ["555 123 4567", "ana"], id="digit_edge_neighbour_on_left"),
+    ],
+)
+def test_widen_hyphen_compounds_never_reduces_coverage(text: str, values: list[str]) -> None:
+    entities = []
+    for idx, value in enumerate(values):
+        start = text.index(value)
+        entities.append(EntitySpan(f"e{idx}", value, "unique_id", start, start + len(value), 1.0, "augmenter"))
+
+    assert _covered(entities) <= _covered(widen_hyphen_compounds(text=text, entities=entities))
+
+
+def _covered(spans: list[EntitySpan]) -> set[int]:
+    return {pos for e in spans for pos in range(e.start_position, e.end_position)}

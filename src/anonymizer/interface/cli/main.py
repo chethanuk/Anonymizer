@@ -7,6 +7,7 @@ import functools
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, ClassVar, Literal
@@ -31,7 +32,13 @@ from anonymizer.config.rewrite import (
 )
 from anonymizer.engine.io.constants import SUPPORTED_IO_FORMATS
 from anonymizer.interface.anonymizer import Anonymizer
-from anonymizer.interface.cli._output import write_result
+from anonymizer.interface.cli._output import (
+    print_preview,
+    print_run_summary,
+    write_failed_records,
+    write_result,
+    write_trace,
+)
 from anonymizer.interface.errors import AnonymizerIOError, InvalidConfigError
 from anonymizer.logging import LoggingConfig, configure_logging
 
@@ -46,6 +53,17 @@ _STRATEGY_CLS = {
     "hash": Hash,
     "annotate": Annotate,
 }
+
+
+# Only run and preview print styled output, so --color is not on the shared CliOpts.
+ColorOpt = Annotated[
+    bool,
+    cyclopts.Parameter(
+        help=(
+            "Style CLI output with ANSI colors when stdout is a terminal. Use --no-color (or set NO_COLOR) to disable."
+        )
+    ),
+]
 
 
 @dataclass
@@ -221,6 +239,29 @@ def _build_config_and_anonymizer(opts: CliOpts) -> tuple[AnonymizerConfig, Anony
     return config, anonymizer
 
 
+def _resolve_output_path(flag: str, value: str, taken: dict[str, Path]) -> Path:
+    """Validate --output, --trace or --failed-output before the pipeline runs, so a bad path cannot waste a run.
+
+    ``taken`` maps the flags already validated to their paths; a path may not repeat one of them.
+    """
+    path = Path(value).resolve()
+    if path.suffix.lower() not in SUPPORTED_IO_FORMATS:
+        raise InvalidConfigError(f"Unsupported {flag} format: {path.suffix!r}. Use one of {SUPPORTED_IO_FORMATS}")
+    if path.is_dir():
+        raise InvalidConfigError(f"{flag} path is a directory: {path}")
+    if path.exists() and not os.access(path, os.W_OK):
+        raise InvalidConfigError(f"{flag} file is not writable: {path}")
+    for other_flag, other in taken.items():
+        if path == other:
+            raise InvalidConfigError(f"{flag} path must differ from {other_flag}: {path}")
+    # write_output creates missing parents, so check the nearest existing ancestor.
+    parent = next(p for p in path.parents if p.exists())
+    if not parent.is_dir() or not os.access(parent, os.W_OK):
+        raise InvalidConfigError(f"{flag} parent is not a writable directory: {parent}")
+    taken[flag] = path
+    return path
+
+
 def _configure_logging(opts: CliOpts) -> None:
     if opts.debug:
         configure_logging(LoggingConfig.debug())
@@ -242,24 +283,52 @@ def run(
             help="Output file path (.csv or .parquet). Defaults to source stem + _anonymized or _rewritten."
         ),
     ] = None,
+    trace: Annotated[
+        str | None,
+        cyclopts.Parameter(help="Also write the full pipeline trace dataset to this path (.csv or .parquet)."),
+    ] = None,
+    failed_output: Annotated[
+        str | None,
+        cyclopts.Parameter(
+            help="Also write failed records (record_id, step, reason) to this path (.csv or .parquet) for triage."
+        ),
+    ] = None,
+    color: ColorOpt = True,
 ) -> None:
     """Run the full anonymization pipeline (detection + replacement or rewrite)."""
     if output is None:
         source = Path(data.source)
         suffix = "_rewritten" if opts.rewrite else "_anonymized"
         output = str(source.parent / f"{source.stem}{suffix}{source.suffix}")
-    output_path = Path(output).resolve()
-    if output_path.suffix.lower() not in SUPPORTED_IO_FORMATS:
-        raise InvalidConfigError(
-            f"Unsupported output format: {output_path.suffix!r}. Use one of {SUPPORTED_IO_FORMATS}"
-        )
-    if output_path == Path(data.source).resolve():
-        raise InvalidConfigError(f"Output path must differ from source: {output_path}")
+    taken = {"--source": Path(data.source).resolve()}
+    _resolve_output_path("--output", output, taken)
+    trace_path = _resolve_output_path("--trace", trace, taken) if trace is not None else None
+    failed_path = _resolve_output_path("--failed-output", failed_output, taken) if failed_output is not None else None
     _configure_logging(opts)
     config, anonymizer = _build_config_and_anonymizer(opts)
+    start = time.perf_counter()
     result = anonymizer.run(config=config, data=data)
+    elapsed = time.perf_counter() - start
     written = write_result(result, output)
-    print(f"Output written to: {written}")
+    trace_written = failed_written = None
+    try:
+        # Failure report first (plain strings, always writable), then the trace, which parquet can reject.
+        if failed_path is not None:
+            failed_written = write_failed_records(result, failed_path)
+        if trace_path is not None:
+            trace_written = write_trace(result, trace_path)
+    finally:
+        # The summary prints even if a side file failed, listing only the files actually written.
+        print_run_summary(
+            result,
+            source=data.source,
+            output_path=written,
+            trace_path=trace_written,
+            failed_path=failed_written,
+            elapsed=elapsed,
+            color=color,
+            failed_export_failed=failed_path is not None and failed_written is None,
+        )
 
 
 @app.command
@@ -269,12 +338,13 @@ def preview(
     data: Annotated[AnonymizerInput, cyclopts.Parameter(name="*")],
     opts: Annotated[CliOpts, cyclopts.Parameter(name="*")] = CliOpts(),
     num_records: int = 10,
+    color: ColorOpt = True,
 ) -> None:
     """Run the pipeline on a subset of records for quick inspection."""
     _configure_logging(opts)
     config, anonymizer = _build_config_and_anonymizer(opts)
     result = anonymizer.preview(config=config, data=data, num_records=num_records)
-    print(result.dataframe.to_string(max_colwidth=80))
+    print_preview(result, color=color)
 
 
 @app.command

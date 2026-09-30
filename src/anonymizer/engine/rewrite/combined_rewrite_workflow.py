@@ -365,7 +365,7 @@ def _finalization_column(
         row[COL_NEEDS_REPAIR] = row.get(state.needs_repair)
         row[COL_REPAIR_ITERATIONS] = state.iteration
 
-        needs_review = row[COL_REWRITTEN_TEXT] is None or bool(row[COL_ANY_HIGH_LEAKED])
+        needs_review = row[COL_REWRITTEN_TEXT] is None
         if generator_params.flag_utility_below is not None:
             needs_review = needs_review or float(row[COL_UTILITY_SCORE]) < generator_params.flag_utility_below
         if generator_params.flag_leakage_above is not None:

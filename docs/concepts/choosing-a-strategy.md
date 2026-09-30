@@ -239,7 +239,7 @@ Being in a regulated domain (medical / legal / financial) is **not** by itself a
 Notes:
 
 - `minimal` and `low` differ mostly in how aggressively repair triggers. Both auto-repair on any high-sensitivity leak.
-- `high` does **not** auto-repair single high-sensitivity leaks. Use only when you have downstream review.
+- `high` does **not** auto-repair single high-sensitivity leaks. No preset flags them for review on their own; filter on `any_high_leaked` if you need them, and use `high` only when you have downstream review.
 - `max_repair_iterations` (default 3) caps cost. Set to 0 to skip repair entirely while still computing leakage / utility metrics — useful for audits.
 
 ---

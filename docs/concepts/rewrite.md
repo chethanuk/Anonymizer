@@ -95,6 +95,8 @@ Controls the automated repair loop and human review flagging. Each preset bundle
 | `moderate` | 1.5 | Yes | 0.4 | 2.5 |
 | `high` | 2.0 | No | 0.3 | 3.0 |
 
+A high-sensitivity leak alone never sets `needs_human_review`; only the utility and leakage thresholds above, or a missing rewrite, do. Use `any_high_leaked` to find those rows.
+
 The **repair threshold** is the leakage mass above which a record is sent for repair.
 > Leakage mass is a confidence-weighted sum of leaked entities, where each entity's weight reflects its sensitivity (high=1.0, medium=0.6, low=0.3).
 > A leakage mass of 1.0 roughly equals one high-sensitivity entity leaked at full confidence.
@@ -160,6 +162,8 @@ Records with `needs_human_review=True` exceeded automated thresholds for leakage
 flagged = result.trace_dataframe[result.trace_dataframe["needs_human_review"] == True]
 flagged[["utility_score", "leakage_mass", "any_high_leaked"]].head()
 ```
+
+`any_high_leaked` is diagnostic only: it does not set `needs_human_review`.
 
 **Tune and re-run:** Adjust settings and re-run on flagged records:
 

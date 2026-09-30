@@ -20,7 +20,8 @@ class RiskTolerance(str, Enum):
       Good for most privacy-sensitive data.
     - **moderate** — Relaxed leakage threshold (1.5), lower review bar.
     - **high** — High leakage threshold (2.0), does not auto-repair
-      individual high-sensitivity leaks.
+      individual high-sensitivity leaks. No preset flags a lone high-sensitivity
+      leak for review; review flags follow the leakage and utility thresholds, or a missing rewrite.
     """
 
     minimal = "minimal"

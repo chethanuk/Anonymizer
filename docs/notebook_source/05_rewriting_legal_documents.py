@@ -189,8 +189,8 @@ result.dataframe[["text_rewritten", "utility_score", "leakage_mass", "needs_huma
 # ## 🚩 Filter by review flag
 #
 # - Records where automated metrics exceed thresholds are flagged for manual review.
-# - The repair loop stops after `max_repair_iterations`; records that still need
-#   repair remain flagged for human review but are not pipeline failures.
+# - The repair loop stops after `max_repair_iterations`; records whose metrics still
+#   exceed the review thresholds are flagged but are not pipeline failures.
 # - Use this to prioritize human attention on the records that need it most.
 # - See [Working with flagged records](../../concepts/rewrite/#working-with-flagged-records)
 #   for guidance on diagnosing and resolving flagged records.

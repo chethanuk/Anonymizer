@@ -462,7 +462,6 @@ class RewriteWorkflow:
         # Compute needs_human_review from objective metrics after the loop exhausts.
         df.loc[replacement_unavailable, COL_REWRITTEN_TEXT] = None
         needs_review = df[COL_REWRITTEN_TEXT].isna()
-        needs_review = needs_review | df[COL_ANY_HIGH_LEAKED].apply(bool)
         if evaluation.flag_utility_below is not None:
             needs_review = needs_review | (df[COL_UTILITY_SCORE].apply(float) < evaluation.flag_utility_below)
         if evaluation.flag_leakage_above is not None:

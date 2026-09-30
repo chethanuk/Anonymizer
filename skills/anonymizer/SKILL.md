@@ -117,7 +117,7 @@ from anonymizer import (
 def build_config() -> tuple[AnonymizerInput, AnonymizerConfig]:
     """Single source of truth for what we anonymize and how."""
     data = AnonymizerInput(
-        source="TODO: path to .csv / .parquet / .jsonl",
+        source="TODO: path to .csv / .parquet / .json / .jsonl",
         text_column="TODO: name of the text column",
         data_summary="TODO: one-line description of the data (domain, genre, anything non-obvious)",
     )
@@ -172,7 +172,11 @@ def main() -> None:
 
     if args.full:
         result = anonymizer.run(config=config, data=data)
-        out_path = "output.parquet"  # TODO: change path/format (.csv, .jsonl) as needed
+        # TODO: change path/format as needed. The call must match the suffix:
+        #   .parquet -> to_parquet(out_path);  .csv -> to_csv(out_path, index=False)
+        #   .json/.jsonl -> anonymizer.engine.io.writer.write_output(result.dataframe, out_path)
+        #   (DataFrame.to_json rounds floats and needs lines=True for .jsonl)
+        out_path = "output.parquet"
         result.dataframe.to_parquet(out_path)
         print(f"Wrote {len(result.dataframe)} rows to {out_path}")
     else:

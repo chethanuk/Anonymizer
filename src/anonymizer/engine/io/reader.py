@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
@@ -178,6 +179,35 @@ def _read_parquet_partial(source: str, *, nrows: int | None = None) -> pd.DataFr
     return table.slice(0, nrows).to_pandas()
 
 
+def read_json_table(source: str | Path, *, lines: bool, nrows: int | None = None) -> pd.DataFrame:
+    """Read .json (``lines=False``) or .jsonl with the settings shared by the engine and benchmark tools.
+
+    dtype/convert_dates are off because JSON already carries its types, and pandas' inference
+    turns "007" into 7 and date-named string columns into epoch integers.
+    """
+    return pd.read_json(
+        source,
+        lines=lines,
+        nrows=nrows,
+        dtype=False,  # ty: ignore[invalid-argument-type] -- pandas annotation omits bool
+        convert_dates=False,
+        precise_float=True,
+        encoding="utf-8-sig",  # tolerate a BOM, like read_csv
+    )
+
+
+def _read_jsonl_partial(source: str, *, nrows: int | None = None) -> pd.DataFrame:
+    """Read a JSON Lines file, stopping early when *nrows* is set.
+
+    ``pd.read_json`` treats ``nrows=0`` as "no limit" rather than "no rows", so passing
+    *nrows* straight through would read the whole file.  Read a single record and slice it
+    away instead, which keeps the column schema and matches the csv and parquet paths.
+    """
+    if nrows is not None and nrows <= 0:
+        return read_json_table(source, lines=True, nrows=1).iloc[0:0]
+    return read_json_table(source, lines=True, nrows=nrows)
+
+
 def _load_dataframe(input_data: AnonymizerInput, *, nrows: int | None = None) -> pd.DataFrame:
     source_str = str(input_data.source)
     suffix = infer_input_source_suffix(source_str)
@@ -189,6 +219,19 @@ def _load_dataframe(input_data: AnonymizerInput, *, nrows: int | None = None) ->
     try:
         if suffix == ".csv":
             df = pd.read_csv(source_str, nrows=nrows)
+        elif suffix == ".jsonl":
+            df = _read_jsonl_partial(source_str, nrows=nrows)
+            if nrows is not None and input_data.text_column not in df.columns:
+                # Ragged records: the text column may first appear after the first nrows
+                # lines, so fall back to a full read rather than fail where run succeeds.
+                df = _read_jsonl_partial(source_str).head(max(nrows, 0))
+        elif suffix == ".json":
+            # pandas rejects nrows unless lines=True, so the whole file is read and sliced
+            # after the fact.  head(max(nrows, 0)) because head(-1) drops the last row
+            # rather than raising, which would be a silently wrong answer.
+            df = read_json_table(source_str, lines=False)
+            if nrows is not None:
+                df = df.head(max(nrows, 0))
         else:
             df = _read_parquet_partial(source_str, nrows=nrows)
     except (OSError, pd.errors.ParserError, ValueError) as error:

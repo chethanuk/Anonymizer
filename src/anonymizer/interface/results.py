@@ -3,14 +3,30 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
+import pyarrow as pa
+from pydantic import TypeAdapter
 
-from anonymizer.config.replace_strategies import ReplaceMethod
+# ponytail: private helper; a maintainer may prefer a public one in config.replace_strategies.
+from anonymizer.config.replace_strategies import ReplaceMethod, _resolve_replace_tag
 from anonymizer.config.rewrite import PrivacyGoal
+from anonymizer.engine.constants import COL_REPLACEMENT_APPLICATION
 from anonymizer.engine.ndd.adapter import FailedRecord
 from anonymizer.interface.display import render_record_html
+from anonymizer.interface.errors import AnonymizerIOError
+
+ARTIFACT_FORMAT_VERSION = 1
+_ARTIFACT_METADATA_FILE = "metadata.json"
+_ARTIFACT_RESULT_FILE = "result.parquet"
+_ARTIFACT_TRACE_FILE = "trace.parquet"
+_ARTIFACT_FAILED_RECORDS_FILE = "failed_records.json"
+_REPLACE_METHOD_ADAPTER: TypeAdapter[Any] = TypeAdapter(ReplaceMethod | None)
 
 
 class _DisplayMixin:
@@ -98,6 +114,144 @@ class AnonymizerResult(_DisplayMixin):
             f"failed_records={len(self.failed_records)}"
             ")"
         )
+
+    def write_artifacts(self, directory: str | Path) -> Path:
+        """Save this result as a versioned artifact directory.
+
+        The directory holds ``result.parquet`` (``dataframe``), ``trace.parquet``
+        (``trace_dataframe``), ``failed_records.json`` and ``metadata.json`` (format
+        version, ``resolved_text_column``, the replace method or privacy goal, and
+        the ``evaluate()`` inputs). ``metadata.json`` is removed first and written
+        last, so a failed or interrupted write never looks loadable. Other files in
+        the directory are left alone. The caller's dataframes are not modified.
+        Dataframe indexes are not saved; ``read_artifacts`` returns a default
+        ``RangeIndex``.
+
+        Args:
+            directory: Target directory. Created, with parents, if missing.
+
+        Returns:
+            The artifact directory path.
+
+        Raises:
+            AnonymizerIOError: If any file cannot be written, or the result has both
+                ``replace_method`` and ``rewrite_config`` set.
+        """
+        path = Path(directory)
+        # read_artifacts rejects this combination, so fail before touching an existing artifact.
+        if self.replace_method is not None and self.rewrite_config is not None:
+            raise AnonymizerIOError(
+                f"Cannot write result artifacts to {str(path)!r}: result has both replace_method and rewrite_config"
+            )
+        replace_method = None
+        if self.replace_method is not None:
+            # ReplaceMethod's discriminator needs "kind" for dict input. Subclasses of the
+            # strategy classes are unsupported: they would resolve to an unknown tag on read.
+            replace_method = {
+                "kind": _resolve_replace_tag(self.replace_method),
+                **self.replace_method.model_dump(mode="json"),
+            }
+        metadata = {
+            "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+            "resolved_text_column": self.resolved_text_column,
+            "replace_method": replace_method,
+            "rewrite_config": None if self.rewrite_config is None else self.rewrite_config.model_dump(mode="json"),
+            "entity_labels": self.entity_labels,
+            "data_summary": self.data_summary,
+            "excluded_entity_labels": self.excluded_entity_labels,
+        }
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            (path / _ARTIFACT_METADATA_FILE).unlink(missing_ok=True)
+            self.dataframe.to_parquet(path / _ARTIFACT_RESULT_FILE, index=False)
+            trace = self.trace_dataframe.copy()
+            if COL_REPLACEMENT_APPLICATION in trace.columns:
+                # Whole dict as JSON: Arrow cannot type ``{}`` maps and turns struct ints into floats
+                # once any row (e.g. an entity-free passthrough row) is null.
+                trace[COL_REPLACEMENT_APPLICATION] = trace[COL_REPLACEMENT_APPLICATION].map(
+                    lambda v: json.dumps(v) if isinstance(v, dict) else v
+                )
+            trace.to_parquet(path / _ARTIFACT_TRACE_FILE, index=False)
+            failed_records = [dataclasses.asdict(record) for record in self.failed_records]
+            (path / _ARTIFACT_FAILED_RECORDS_FILE).write_text(json.dumps(failed_records), encoding="utf-8")
+            (path / _ARTIFACT_METADATA_FILE).write_text(json.dumps(metadata), encoding="utf-8")
+        except (OSError, ValueError, TypeError, pa.ArrowException) as error:
+            raise AnonymizerIOError(f"Failed to write result artifacts to {str(path)!r}") from error
+        return path
+
+    @classmethod
+    def read_artifacts(cls, directory: str | Path) -> AnonymizerResult:
+        """Load a result saved by ``write_artifacts``.
+
+        ``metadata.json`` is read and its format version checked before any Parquet
+        file is opened. ``_replacement_application`` comes back as dicts, and the
+        replace method, privacy goal and failed records as their original types.
+        List cells in trace columns come back as ``numpy.ndarray``, the standard
+        pandas Parquet read shape. The result can be passed to ``Anonymizer.evaluate()``.
+
+        Args:
+            directory: Artifact directory written by ``write_artifacts``.
+
+        Returns:
+            The reconstructed result.
+
+        Raises:
+            AnonymizerIOError: If the directory is incomplete or unreadable, or its
+                ``artifact_format_version`` is not supported.
+        """
+        path = Path(directory)
+        try:
+            metadata = json.loads((path / _ARTIFACT_METADATA_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise AnonymizerIOError(f"Failed to read result artifact metadata from {str(path)!r}") from error
+        if not isinstance(metadata, dict):
+            raise AnonymizerIOError(f"Result artifact metadata in {str(path)!r} must be a JSON object")
+        version = metadata.get("artifact_format_version")
+        # bool is an int subclass, so ``True == 1`` must not pass as version 1.
+        if not (type(version) is int and version == ARTIFACT_FORMAT_VERSION):
+            raise AnonymizerIOError(
+                f"Unsupported artifact_format_version {version!r} in {str(path)!r}; expected {ARTIFACT_FORMAT_VERSION}"
+            )
+        # evaluate() picks rewrite mode whenever rewrite_config is set, so a result with both would be misread.
+        if metadata.get("replace_method") is not None and metadata.get("rewrite_config") is not None:
+            raise AnonymizerIOError(
+                f"Result artifact metadata in {str(path)!r} has both replace_method and rewrite_config"
+            )
+        # A hand-edited file would otherwise load and only fail later, inside evaluate().
+        for name, expected in (
+            ("resolved_text_column", str),
+            ("data_summary", str | None),
+            ("entity_labels", list | None),
+            ("excluded_entity_labels", list | None),
+        ):
+            value = metadata.get(name)
+            is_valid = isinstance(value, expected) and (
+                not isinstance(value, list) or all(isinstance(v, str) for v in value)
+            )
+            if not is_valid:
+                raise AnonymizerIOError(f"Result artifact metadata in {str(path)!r} has an invalid {name}: {value!r}")
+        try:
+            dataframe = pd.read_parquet(path / _ARTIFACT_RESULT_FILE)
+            trace_dataframe = pd.read_parquet(path / _ARTIFACT_TRACE_FILE)
+            if COL_REPLACEMENT_APPLICATION in trace_dataframe.columns:
+                trace_dataframe[COL_REPLACEMENT_APPLICATION] = trace_dataframe[COL_REPLACEMENT_APPLICATION].map(
+                    lambda v: json.loads(v) if isinstance(v, str) else v
+                )
+            failed_records = json.loads((path / _ARTIFACT_FAILED_RECORDS_FILE).read_text(encoding="utf-8"))
+            rewrite_config = metadata["rewrite_config"]
+            return cls(
+                dataframe=dataframe,
+                trace_dataframe=trace_dataframe,
+                resolved_text_column=metadata["resolved_text_column"],
+                failed_records=[FailedRecord(**record) for record in failed_records],
+                replace_method=_REPLACE_METHOD_ADAPTER.validate_python(metadata["replace_method"]),
+                rewrite_config=None if rewrite_config is None else PrivacyGoal.model_validate(rewrite_config),
+                entity_labels=metadata["entity_labels"],
+                data_summary=metadata["data_summary"],
+                excluded_entity_labels=metadata["excluded_entity_labels"],
+            )
+        except (OSError, ValueError, KeyError, TypeError, pa.ArrowException) as error:
+            raise AnonymizerIOError(f"Failed to read result artifacts from {str(path)!r}") from error
 
 
 @dataclass

@@ -34,6 +34,7 @@ from anonymizer.engine.replace.replace_runner import ReplacementResult, Replacem
 from anonymizer.engine.rewrite.rewrite_workflow import RewriteResult, RewriteWorkflow
 from anonymizer.interface.anonymizer import Anonymizer, _resolve_model_providers
 from anonymizer.interface.errors import InvalidConfigError, InvalidInputError
+from anonymizer.interface.results import AnonymizerResult
 
 
 @pytest.fixture
@@ -1178,3 +1179,48 @@ def test_evaluate_passes_detection_context_to_coverage_judge(stub_input: Anonymi
     assert mock_coverage_wf.call_args.kwargs["excluded_entity_labels"] == ["email"]
     assert evaluated.data_summary == "Customer support transcripts."
     assert evaluated.excluded_entity_labels == ["email"]
+
+
+@pytest.mark.parametrize(
+    "mode_config",
+    [
+        pytest.param({"replace": Redact()}, id="replace"),
+        pytest.param({"rewrite": Rewrite()}, id="rewrite"),
+    ],
+)
+def test_evaluate_accepts_result_loaded_from_artifacts(
+    stub_input: AnonymizerInput, tmp_path: Path, mode_config: dict
+) -> None:
+    """A run() result saved with write_artifacts and read back drives evaluate() like the original."""
+    data = stub_input.model_copy(update={"data_summary": "Customer support transcripts."})
+    config = AnonymizerConfig(
+        detect={"entity_labels": ["first_name", "last_name"], "excluded_entity_labels": ["email"]}, **mode_config
+    )
+    anonymizer, _, replace_runner, rewrite_runner = _make_anonymizer()
+    run_result = anonymizer.run(config=config, data=data)
+    # Nested list cell: Parquet reads it back as numpy.ndarray, which evaluate() must still accept.
+    run_result.trace_dataframe[COL_FINAL_ENTITIES] = [{"entities": [{"value": "Alice", "label": "first_name"}]}]
+    loaded = AnonymizerResult.read_artifacts(run_result.write_artifacts(tmp_path / "artifacts"))
+
+    eval_df = pd.DataFrame({COL_TEXT: ["Alice works at Acme"]})
+    replace_runner.evaluate.return_value = ReplacementResult(dataframe=eval_df, failed_records=[])
+    rewrite_runner.evaluate.return_value = RewriteResult(dataframe=eval_df, failed_records=[])
+    with patch("anonymizer.interface.anonymizer.EntityCoverageWorkflow") as mock_coverage_wf:
+        mock_coverage_wf.return_value.run_non_critical.return_value = (eval_df, [])
+        anonymizer.evaluate(loaded)
+
+    if "replace" in mode_config:
+        rewrite_runner.evaluate.assert_not_called()
+        runner_call = replace_runner.evaluate.call_args
+        assert runner_call.kwargs["replace_method"] == Redact()
+        context = runner_call.kwargs
+    else:
+        replace_runner.evaluate.assert_not_called()
+        runner_call = rewrite_runner.evaluate.call_args
+        assert runner_call.kwargs["privacy_goal"] == run_result.rewrite_config
+        context = mock_coverage_wf.call_args.kwargs
+    assert context["entity_labels"] == ["first_name", "last_name"]
+    assert context["excluded_entity_labels"] == ["email"]
+    assert context["data_summary"] == "Customer support transcripts."
+    entities = runner_call.args[0][COL_FINAL_ENTITIES].iloc[0]["entities"]
+    assert [(entity["value"], entity["label"]) for entity in entities] == [("Alice", "first_name")]

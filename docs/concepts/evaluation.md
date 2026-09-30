@@ -28,7 +28,19 @@ evaluated = anonymizer.evaluate(result)
 evaluated.display_record(0)
 ```
 
-Both `run()` and `preview()` results can be saved and evaluated in a separate session:
+Both `run()` and `preview()` results can be saved and evaluated in a separate session. Save a `run()` result with `write_artifacts()` and load it with `AnonymizerResult.read_artifacts()`:
+
+```python
+from anonymizer.interface.results import AnonymizerResult
+
+result.write_artifacts("run_artifacts")
+
+# … later …
+loaded = AnonymizerResult.read_artifacts("run_artifacts")
+evaluated = anonymizer.evaluate(loaded)
+```
+
+`preview()` results don't have these methods, but the `AnonymizerResult` returned by `anonymizer.evaluate(preview)` does, so you can save an evaluated preview the same way. To save a `preview()` result itself, pickle it. Only unpickle files you trust:
 
 ```python
 import pickle
@@ -228,7 +240,19 @@ evaluated = anonymizer.evaluate(result)
 evaluated.display_record(0)
 ```
 
-Both `run()` and `preview()` results can be saved and evaluated in a separate session:
+Both `run()` and `preview()` results can be saved and evaluated in a separate session. Save a `run()` result with `write_artifacts()` and load it with `AnonymizerResult.read_artifacts()`:
+
+```python
+from anonymizer.interface.results import AnonymizerResult
+
+result.write_artifacts("run_artifacts")
+
+# … later …
+loaded = AnonymizerResult.read_artifacts("run_artifacts")
+evaluated = anonymizer.evaluate(loaded)
+```
+
+`preview()` results don't have these methods, but the `AnonymizerResult` returned by `anonymizer.evaluate(preview)` does, so you can save an evaluated preview the same way. To save a `preview()` result itself, pickle it. Only unpickle files you trust:
 
 ```python
 import pickle

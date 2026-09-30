@@ -25,6 +25,15 @@ def median_or_none(dataframe: pd.DataFrame, column: str) -> float | None:
     return float(values.median())
 
 
+def mean_or_none(dataframe: pd.DataFrame, column: str) -> float | None:
+    if column not in dataframe.columns:
+        return None
+    values = pd.to_numeric(dataframe[column], errors="coerce").dropna()
+    if values.empty:
+        return None
+    return float(values.mean())
+
+
 def sum_int_or_zero(dataframe: pd.DataFrame, column: str) -> int:
     return int(sum_or_zero(dataframe, column))
 

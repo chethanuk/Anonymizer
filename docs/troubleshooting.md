@@ -9,7 +9,7 @@ When something looks wrong, **first confirm the run completed cleanly** (no `fai
 
 !!! note "This guide is written against the Python API"
 
-    Diagnostic objects like `result.failed_records` and `result.trace_dataframe` only exist in Python. The CLI is for production batch runs and only emits a per-stage summary line on stderr (`📋 Detection complete — N entities … (K failed) [Xs]`); if `K > 0` you have a problem to investigate, but the CLI can't tell you *which* rows or *why*. Drop into Python (or import the same config from the agent's config file) for everything below.
+    Diagnostic objects like `result.failed_records` and `result.trace_dataframe` are Python objects. The CLI prints a `Failed` count, and grouped failure reasons when there are any, in the `anonymizer run` summary. To get the rows themselves, pass `anonymizer run --trace trace.parquet --failed-output failed.csv`: the first writes the trace dataset, the second writes `record_id, step, reason` for every failed record. For everything else below, use Python (or import the same config from the agent's config file).
 
 ---
 

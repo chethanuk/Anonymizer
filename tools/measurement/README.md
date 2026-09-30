@@ -97,6 +97,7 @@ orchestration or distributed DataDesigner execution.
 | Run repeatable Anonymizer suites | `run_benchmarks.py` |
 | Inspect detection artifact sidecars | `analyze_detection_artifacts.py` |
 | Analyze benchmark output directories | `analyze_benchmark_output.py` |
+| Compare two benchmark output directories | `compare_benchmark_output.py` |
 | Write an atomic external-case completion seal | `write_completion_seal.py` |
 | Import one sealed external case into W&B | `import_wandb_run.py` |
 | Create W&B benchmark workspaces or reports | `create_wandb_report.py` |
@@ -647,6 +648,40 @@ Important outputs:
 Use `--detection-artifacts` to provide an explicit detection artifact JSONL
 sidecar. Otherwise, the analyzer reads `detection-artifacts.jsonl` in the
 benchmark directory when present.
+
+### Compare two runs
+
+`compare_benchmark_output.py` compares a baseline and a candidate benchmark
+output directory group by group, matched on `workload_id` and `config_id`:
+
+```bash
+uv run python tools/measurement/compare_benchmark_output.py \
+  benchmark-runs/baseline \
+  benchmark-runs/candidate \
+  --output benchmark-runs/candidate/comparison \
+  --format csv
+```
+
+Each row carries the baseline value, candidate value, absolute delta, percent
+delta, and a verdict (`improved`, `regressed`, `unchanged`, or
+`not_comparable`) from the metric's direction. The percent delta is empty when
+the baseline is zero. Groups present in only one run are listed as unmatched
+rather than dropped. Groups are resolved the same way as in
+`analyze_benchmark_output.py`, so runs without `run_tags` still match. A run
+where one `workload_id`/`config_id` pair spans several analyzer groups (for
+example two `gliner_threshold` values) is rejected. Runs with different
+measurement schema versions are rejected; compare versions separately. An
+unversioned run is read as version 1, as the analyzer does.
+
+`empty_detection_with_ground_truth_rate` is reported directly after
+`utility_score_mean`. Records with no detected entities skip rewrite with a
+utility of 1.0, so a utility gain can come from lower detection recall. Read
+the two together. The rate counts only records that have ground-truth
+entities, because an empty detection on a record with no PII is correct.
+
+Leak counts are sums, so they only compare across runs over the same records.
+When a matched group has a different `total_record_count` in the two runs, the
+tool logs a warning. A run with no record rows, or two runs with no group in common, are rejected.
 
 ## Pandas patterns
 

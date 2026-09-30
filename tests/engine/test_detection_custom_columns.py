@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from unittest.mock import Mock
 
 from anonymizer.engine.constants import (
     COL_AUGMENTED_ENTITIES,
@@ -39,6 +40,8 @@ from anonymizer.engine.detection.custom_columns import (
     merge_and_build_candidates,
     parse_detected_entities,
 )
+from anonymizer.engine.workflow_columns.detection.config import DetectionTransformConfig, DetectionTransformOperation
+from anonymizer.engine.workflow_columns.detection.impl import DetectionTransformGenerator
 
 
 def test_parse_entity_spans_handles_malformed_payload() -> None:
@@ -270,6 +273,63 @@ def test_finalize_filters_reclassification_outside_explicit_label_set() -> None:
 
     assert result[COL_DETECTED_ENTITIES]["entities"] == []
     assert result[COL_TAGGED_TEXT] == "San Diego"
+
+
+def test_conjoined_name_stays_redacted_under_a_strict_label_allow_list() -> None:
+    """Merge then finalize with only full_name allowed: every name in the conjunction stays tagged."""
+    text = "Aria and Leo Watford arrived. Leo waved."
+    parent = {
+        "id": "fn",
+        "value": "Aria and Leo Watford",
+        "label": "full_name",
+        "start_position": 0,
+        "end_position": 20,
+        "score": 0.9,
+        "source": "detector",
+    }
+    row = {
+        COL_TEXT: text,
+        COL_VALIDATED_SEED_ENTITIES: {"entities": [parent]},
+        COL_AUGMENTED_ENTITIES: {"entities": []},
+        COL_VALIDATED_ENTITIES: {"decisions": []},
+    }
+
+    row = merge_and_build_candidates(row, allowed_entity_labels=["full_name"])
+    result = apply_validation_and_finalize(row, allowed_entity_labels=["full_name"])
+
+    assert result[COL_TAGGED_TEXT].startswith("<full_name>Aria</full_name> and <full_name>Leo Watford</full_name>")
+
+
+def test_generator_passes_strict_allow_list_to_merge() -> None:
+    """The real generator path must forward allowed_entity_labels, or the split parts lose their labels."""
+    parent = {
+        "id": "fn",
+        "value": "Aria and Leo Watford",
+        "label": "full_name",
+        "start_position": 0,
+        "end_position": 20,
+        "score": 0.9,
+        "source": "detector",
+    }
+    row = {
+        COL_TEXT: "Aria and Leo Watford arrived. Leo waved.",
+        COL_VALIDATED_SEED_ENTITIES: {"entities": [parent]},
+        COL_AUGMENTED_ENTITIES: {"entities": []},
+    }
+    generator = DetectionTransformGenerator(
+        DetectionTransformConfig(
+            name=COL_MERGED_TAGGED_TEXT,
+            operation=DetectionTransformOperation.MERGE_AND_BUILD_CANDIDATES,
+            allowed_entity_labels=["full_name"],
+        ),
+        resource_provider=Mock(),
+    )
+
+    result = generator.generate(row)
+
+    assert result[COL_MERGED_TAGGED_TEXT].startswith(
+        "<full_name>Aria</full_name> and <full_name>Leo Watford</full_name>"
+    )
 
 
 def test_enrich_validation_decisions_adds_value_from_candidates() -> None:

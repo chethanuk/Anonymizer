@@ -229,6 +229,247 @@ def test_name_split_does_not_duplicate_existing_entities() -> None:
     assert smiths[0].label == "last_name"
 
 
+def test_conjoined_first_names_are_split_into_separate_entities() -> None:
+    text = "His children, Aria and Leo, visited."
+    merged = apply_augmented_entities(
+        text=text,
+        entities=[EntitySpan("fn", "Aria and Leo", "first_name", 14, 26, 0.9, "detector")],
+        augmented_output={"entities": []},
+    )
+    assert [(e.value, e.label, e.start_position, e.end_position) for e in merged] == [
+        ("Aria", "first_name", 14, 18),
+        ("Leo", "first_name", 23, 26),
+    ]
+    # Exact equality above also proves the merged parent was removed, not supplemented.
+
+
+def test_conjoined_split_tags_later_standalone_mention() -> None:
+    text = "Aria and Leo played. Aria slept."
+    merged = apply_augmented_entities(
+        text=text,
+        entities=[EntitySpan("fn", "Aria and Leo", "first_name", 0, 12, 0.9, "detector")],
+        augmented_output={"entities": []},
+    )
+    assert sorted(e.start_position for e in merged if e.value == "Aria") == [0, 21]
+    leos = [e for e in merged if e.value == "Leo"]
+    assert len(leos) == 1
+    assert leos[0].start_position == 9
+
+
+def test_conjoined_split_span_values_match_text_for_differently_cased_mentions() -> None:
+    """strategies skips spans whose text slice != value, so a case-folded value leaks the mention."""
+    text = "Aria and Leo played. ARIA slept."
+    merged = apply_augmented_entities(
+        text=text,
+        entities=[EntitySpan("fn", "Aria and Leo", "first_name", 0, 12, 0.9, "detector")],
+        augmented_output={"entities": []},
+    )
+    assert all(text[e.start_position : e.end_position] == e.value for e in merged)
+    assert sorted((e.start_position, e.value) for e in merged) == [(0, "Aria"), (9, "Leo"), (21, "ARIA")]
+
+
+def test_conjoined_split_handles_shared_surname() -> None:
+    text = "Aria and Leo Watford arrived. Leo waved."
+    merged = apply_augmented_entities(
+        text=text,
+        entities=[EntitySpan("fn", "Aria and Leo Watford", "full_name", 0, 20, 0.9, "detector")],
+        augmented_output={"entities": []},
+    )
+    assert not any(" and " in e.value for e in merged)
+    # A one-token part of a full_name is a given name, not a full name.
+    aria = [e for e in merged if e.value == "Aria"]
+    assert len(aria) == 1
+    assert (aria[0].label, aria[0].start_position) == ("first_name", 0)
+    # "Leo Watford" stays a full_name, so _split_full_names still reaches the
+    # standalone "Leo" later in the text.
+    assert any(e.value == "Leo Watford" and e.label == "full_name" for e in merged)
+    assert any(e.value == "Leo" and e.start_position == 30 for e in merged)
+
+
+def test_conjoined_split_keeps_parent_offsets_when_a_name_exists_elsewhere() -> None:
+    """A pre-existing span for one name must not leave the conjoined offsets untagged.
+
+    The parent is removed, so skipping "Aria" just because it is tagged at 21 would
+    leave 0-4 unprotected, which is the leak this whole change exists to close.
+    """
+    text = "Aria and Leo played. Aria slept."
+    merged = apply_augmented_entities(
+        text=text,
+        entities=[
+            EntitySpan("fn", "Aria and Leo", "first_name", 0, 12, 0.9, "detector"),
+            EntitySpan("a2", "Aria", "first_name", 21, 25, 1.0, "detector"),
+        ],
+        augmented_output={"entities": []},
+    )
+    assert sorted(e.start_position for e in merged if e.value == "Aria") == [0, 21]
+    assert any(e.value == "Leo" and e.start_position == 9 for e in merged)
+    # The pre-existing span is preserved rather than replaced by a split duplicate.
+    existing = [e for e in merged if e.value == "Aria" and e.start_position == 21]
+    assert [e.source for e in existing] == ["detector"]
+
+
+def test_conjoined_split_does_not_relabel_into_an_excluded_label() -> None:
+    """Exclusions run before this split, so a relabel would silently untag the name."""
+    merged = apply_augmented_entities(
+        text="Aria and Leo Watford came.",
+        entities=[EntitySpan("fn", "Aria and Leo Watford", "full_name", 0, 20, 0.9, "detector")],
+        augmented_output={"entities": []},
+        excluded_entity_labels={"first_name"},
+    )
+    aria = [e for e in merged if e.value == "Aria"]
+    assert len(aria) == 1
+    assert aria[0].label == "full_name"
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "label"),
+    [
+        ("Marks and Spencer is a shop.", "Marks and Spencer", "company_name"),
+        ("Andrea waved.", "Andrea", "first_name"),
+        ("Bob and Sue met.", "and", "first_name"),
+        ("Smith, John called.", "Smith, John", "full_name"),
+        ("Hi Aria, J and Leo.", "Aria, J and Leo", "first_name"),
+        ("Hi Aria &amp; Leo.", "Aria &amp; Leo", "first_name"),
+        ("Hi Aria &#38; Leo.", "Aria &#38; Leo", "first_name"),
+        ("Mr. and Mrs. Smith came.", "Mr. and Mrs. Smith", "full_name"),
+        ("Mr and Mrs Smith came.", "Mr and Mrs Smith", "full_name"),
+        ("Miss and Mrs Smith came.", "Miss and Mrs Smith", "full_name"),
+        ("Prof and Dr Smith came.", "Prof and Dr Smith", "full_name"),
+        ("Rev. and Mrs. Smith came.", "Rev. and Mrs. Smith", "full_name"),
+        ("Sen. and Mrs. Smith came.", "Sen. and Mrs. Smith", "full_name"),
+        ("Capt. and Mrs. Smith came.", "Capt. and Mrs. Smith", "full_name"),
+        ("Mr. and Mrs. came.", "Mr. and Mrs.", "first_name"),
+        ("Mr. and Mrs. Smith came.", "Mr. and Mrs. Smith", "last_name"),
+    ],
+    ids=[
+        "non_person_label",
+        "no_conjunction",
+        "degenerate_value",
+        "comma_without_conjunction",
+        "initial_part",
+        "html_escaped_ampersand",
+        "numeric_html_escaped_ampersand",
+        "honorific_with_period",
+        "honorific_without_period",
+        "honorific_miss",
+        "honorific_prof",
+        "honorific_rev",
+        "honorific_sen",
+        "honorific_capt",
+        "honorific_first_name_parent",
+        "honorific_last_name_parent",
+    ],
+)
+def test_conjoined_split_leaves_span_unchanged(text: str, value: str, label: str) -> None:
+    start = text.index(value)
+    merged = apply_augmented_entities(
+        text=text,
+        entities=[EntitySpan("e1", value, label, start, start + len(value), 0.9, "detector")],
+        augmented_output={"entities": []},
+    )
+    assert [(e.value, e.label) for e in merged] == [(value, label)]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("Aria & Leo", [("Aria", 0), ("Leo", 7)]), ("ARIA AND LEO", [("ARIA", 0), ("LEO", 9)])],
+    ids=["ampersand", "uppercase_and"],
+)
+def test_conjoined_split_handles_other_conjunction_forms(value: str, expected: list[tuple[str, int]]) -> None:
+    merged = apply_augmented_entities(
+        text=f"{value} played.",
+        entities=[EntitySpan("fn", value, "first_name", 0, len(value), 0.9, "detector")],
+        augmented_output={"entities": []},
+    )
+    assert [(e.value, e.start_position) for e in merged] == expected
+
+
+@pytest.mark.parametrize("value", ["Aria, Leo and Max", "Aria, Leo, and Max"])
+def test_conjoined_split_handles_three_names(value: str) -> None:
+    text = f"The kids {value} played."
+    start = text.index(value)
+    merged = apply_augmented_entities(
+        text=text,
+        entities=[EntitySpan("fn", value, "first_name", start, start + len(value), 0.9, "detector")],
+        augmented_output={"entities": []},
+    )
+    assert [e.value for e in merged] == ["Aria", "Leo", "Max"]
+    assert all(e.label == "first_name" for e in merged)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (
+            "John Smith, Jr. and Mary Smith",
+            [("John Smith, Jr.", "full_name"), ("Mary Smith", "full_name")],
+        ),
+        ("Smith, John and Mary Jones", [("Smith, John", "full_name"), ("Mary Jones", "full_name")]),
+    ],
+    ids=["suffix", "surname_first"],
+)
+def test_conjoined_full_name_is_not_split_on_commas(value: str, expected: list[tuple[str, str]]) -> None:
+    """A comma inside a full_name belongs to one name, so it must not yield a first_name part."""
+    text = f"Guests: {value}."
+    start = text.index(value)
+    merged = apply_augmented_entities(
+        text=text,
+        entities=[EntitySpan("fn", value, "full_name", start, start + len(value), 0.9, "detector")],
+        augmented_output={"entities": []},
+    )
+    assert [(e.value, e.label) for e in merged] == expected
+
+
+def test_conjoined_last_name_is_not_split_on_commas() -> None:
+    """A comma inside a last_name ("Smith, Jr.") is a suffix, not a list separator."""
+    text = "The Smith, Jr. and Jones families came."
+    value = "Smith, Jr. and Jones"
+    start = text.index(value)
+    merged = apply_augmented_entities(
+        text=text,
+        entities=[EntitySpan("ln", value, "last_name", start, start + len(value), 0.9, "detector")],
+        augmented_output={"entities": []},
+    )
+    assert [(e.value, e.label) for e in merged] == [("Smith, Jr.", "last_name"), ("Jones", "last_name")]
+
+
+@pytest.mark.parametrize(
+    ("allowed", "expected_label"),
+    [
+        ({"full_name"}, "full_name"),
+        ({"full_name", "first_name"}, "first_name"),
+        (None, "first_name"),
+    ],
+    ids=["first_name_not_allowed", "first_name_allowed", "no_allow_list"],
+)
+def test_conjoined_split_only_relabels_into_an_allowed_label(allowed: set[str] | None, expected_label: str) -> None:
+    """The allow-list runs after this split, so a relabel into a disallowed label would drop the name."""
+    merged = apply_augmented_entities(
+        text="Aria and Leo Watford came.",
+        entities=[EntitySpan("fn", "Aria and Leo Watford", "full_name", 0, 20, 0.9, "detector")],
+        augmented_output={"entities": []},
+        allowed_entity_labels=allowed,
+    )
+    aria = [e for e in merged if e.value == "Aria"]
+    assert [e.label for e in aria] == [expected_label]
+
+
+def test_conjoined_full_name_with_trailing_period_on_a_part_is_still_split() -> None:
+    """Known wart, not intent: the sentence period stays in the part ("Mary.").
+
+    Only a known honorific keeps a span merged, so a name that ends a sentence is still split.
+    The stray period is harmless for redaction (the part still covers the name) but ideally
+    would be trimmed; this pins today's behaviour so a change to it is deliberate.
+    """
+    text = "Met John and Mary."
+    merged = apply_augmented_entities(
+        text=text,
+        entities=[EntitySpan("fn", "John and Mary.", "full_name", 4, 18, 0.9, "detector")],
+        augmented_output={"entities": []},
+    )
+    assert [(e.value, e.label) for e in merged] == [("John", "first_name"), ("Mary.", "first_name")]
+
+
 def test_build_tagged_text_renders_xml_style_tags() -> None:
     text = "Alice Smith"
     entities = [EntitySpan("id1", "Alice", "first_name", 0, 5, 1.0, "detector")]

@@ -183,8 +183,14 @@ def apply_augmented_entities(
     entities: list[EntitySpan],
     augmented_output: dict | str,
     excluded_entity_labels: set[str] | None = None,
+    allowed_entity_labels: set[str] | None = None,
 ) -> list[EntitySpan]:
-    """Add allowed augmented entities, split full names, and resolve overlaps."""
+    """Add allowed augmented entities, split conjoined and full names, and resolve overlaps.
+
+    ``allowed_entity_labels`` is the strict label allow-list applied later by
+    ``apply_validation_and_finalize`` (``None`` = no allow-list). The conjunction split needs it
+    so it never relabels a name into a label that filter would then drop.
+    """
     payload = _safe_json_loads(augmented_output) if isinstance(augmented_output, str) else augmented_output
     augmented = payload.get("entities", []) if isinstance(payload, dict) else []
     if not isinstance(augmented, list):
@@ -213,8 +219,138 @@ def apply_augmented_entities(
                 )
             )
 
+    allowed = None if allowed_entity_labels is None else normalize_labels(allowed_entity_labels)
+    merged = _split_conjoined_person_names(text=text, entities=merged, excluded=excluded, allowed=allowed)
     merged = _split_full_names(text=text, entities=merged)
     return resolve_overlaps(merged)
+
+
+_PERSON_NAME_LABELS = frozenset({"first_name", "middle_name", "last_name", "full_name"})
+
+# A person span is split only when it actually contains a conjunction. The lookahead after ``&``
+# rejects HTML entities ("Aria &amp; Leo", "Aria &#38; Leo"), whose parts would be garbage.
+_CONJ = r"\band\b|&(?![\w#])"
+_CONJUNCTION_PATTERN = re.compile(_CONJ, flags=re.IGNORECASE)
+# Only a first_name list ("Aria, Leo and Max") is comma-separated. A comma inside any other person
+# label belongs to one name ("Smith, John", "John Smith, Jr.", last_name "Smith, Jr."), so those
+# are split on the conjunction alone.
+_FIRST_NAME_SEPARATOR_PATTERN = re.compile(rf"\s*(?:,|{_CONJ})\s*", flags=re.IGNORECASE)
+_CONJ_SEPARATOR_PATTERN = re.compile(rf"\s*(?:{_CONJ})\s*", flags=re.IGNORECASE)
+# "Mr. and Mrs. Smith": splitting would leave the lone "Mr." as its own name span, which
+# Substitute/Hash then replace with a fake name. Keep such a span merged, whatever its label.
+_HONORIFICS = frozenset(
+    {
+        "mr",
+        "mrs",
+        "ms",
+        "miss",
+        "mx",
+        "dr",
+        "prof",
+        "sir",
+        "rev",
+        "sen",
+        "hon",
+        "fr",
+        "capt",
+        "gov",
+        "col",
+        "gen",
+        "lt",
+        "sgt",
+    }
+)
+
+
+def _split_conjoined_person_names(
+    text: str,
+    entities: list[EntitySpan],
+    excluded: set[str] | None = None,
+    allowed: set[str] | None = None,
+) -> list[EntitySpan]:
+    """Replace a person span that swallowed a conjunction with one span per name.
+
+    A detector that scores "Aria and Leo" above threshold emits it as a single
+    ``first_name`` span, and :func:`resolve_overlaps` prefers that longer span
+    over the two names inside it. The merged value then keys the replacement
+    map, so a later standalone "Aria" is never matched.
+
+    Unlike :func:`_split_full_names` this *replaces* the parent span instead of
+    adding to it: each part overlaps the parent, so keeping it would let
+    :func:`resolve_overlaps` discard the very spans this adds.
+
+    Known ceiling: English conjunctions ("and", "&") and the labels in
+    ``_PERSON_NAME_LABELS`` only. Non-English conjunctions ("y", "und", "et")
+    are left alone even though the detector checkpoint is multilingual.
+    Only ``first_name`` lists are split on commas, so a comma-listed ``last_name`` ("Smith, Jones
+    and Brown") splits into "Smith, Jones" and "Brown".
+    """
+    excluded = excluded or set()
+    # Positions already carried by some other span. Dedupe has to be positional, not by
+    # value: this function removes the parent, so skipping a part because its value exists
+    # *somewhere else* would leave the parent's own offsets untagged.
+    occupied = {(entity.start_position, entity.end_position) for entity in entities}
+    result: list[EntitySpan] = []
+
+    for entity in entities:
+        label = normalize_label(entity.label)
+        is_person = label in _PERSON_NAME_LABELS
+        if not is_person or not _CONJUNCTION_PATTERN.search(entity.value):
+            result.append(entity)
+            continue
+        is_full_name = label == "full_name"
+        separator = _FIRST_NAME_SEPARATOR_PATTERN if label == "first_name" else _CONJ_SEPARATOR_PATTERN
+        parts = [part for part in separator.split(entity.value) if part]
+        # A one-character part ("Aria, J and Leo") would be left untagged once the parent is
+        # removed, so keep the merged span instead.
+        if len(parts) < 2 or any(len(part) < 2 for part in parts):
+            result.append(entity)
+            continue
+        if any(_is_lone_honorific(part) for part in parts):
+            result.append(entity)
+            continue
+
+        split_spans: list[EntitySpan] = []
+        located = True
+        for part in parts:
+            occurrences = _find_all_occurrences(text=text, needle=part)
+            if not occurrences:
+                located = False
+                break
+            # A one-token piece of a full_name is a given name, not a full name. Not when
+            # first_name is excluded or missing from a strict allow-list though: both filters
+            # run after this split, so relabelling would hand the name to them and untag it.
+            # Keeping the parent's label (already allowed) keeps the name redacted.
+            is_given_name = is_full_name and " " not in part
+            first_name_usable = "first_name" not in excluded and (allowed is None or "first_name" in allowed)
+            part_label = "first_name" if is_given_name and first_name_usable else entity.label
+            split_spans.extend(
+                EntitySpan(
+                    entity_id=_build_entity_id(label=part_label, start=start, end=end),
+                    # Occurrences are found case-insensitively; strategies skip spans whose
+                    # text slice differs from value, so carry the text as written.
+                    value=text[start:end],
+                    label=part_label,
+                    start_position=start,
+                    end_position=end,
+                    score=entity.score,
+                    source="conjunction_split",
+                )
+                for start, end in occurrences
+                if (start, end) not in occupied
+            )
+
+        if not located:
+            # Keep the merged span rather than lose the entity outright.
+            result.append(entity)
+            continue
+        result.extend(split_spans)
+
+    return result
+
+
+def _is_lone_honorific(part: str) -> bool:
+    return " " not in part and part.rstrip(".").lower() in _HONORIFICS
 
 
 def _split_full_names(text: str, entities: list[EntitySpan]) -> list[EntitySpan]:

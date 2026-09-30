@@ -131,7 +131,7 @@ print(f"Columns: {list(trace_df.columns)}")
 # ## 🎯 Detected entities
 #
 # - Final entity list after validation. Each entity has `value`, `label`,
-#   positions, `score`, and `source` (detector / augmenter / name_split / propagation).
+#   positions, `score`, and `source` (detector / augmenter / name_split / conjunction_split / propagation).
 
 # %%
 row_idx = 0
@@ -167,6 +167,7 @@ for label, count in label_counts.most_common():
 #     - `augmenter` -- LLM-added (missed by GLiNER)
 #     - `validator` -- LLM decision step over detector-seed entities (keep/reclass/drop); does not emit a separate source value
 #     - `name_split` -- derived from splitting full names
+#     - `conjunction_split` -- derived from splitting conjoined person names (e.g. "Aria and Leo")
 #     - `propagation` -- expanded from validated entities to all text occurrences
 
 # %%

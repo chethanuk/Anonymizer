@@ -109,6 +109,7 @@ class DetectionTransformGenerator(ColumnGeneratorCellByCell[DetectionTransformCo
             return merge_and_build_candidates(
                 data,
                 excluded_entity_labels=self.config.excluded_entity_labels,
+                allowed_entity_labels=self.config.allowed_entity_labels,
             )
         if operation == DetectionTransformOperation.APPLY_VALIDATION_AND_FINALIZE:
             return apply_validation_and_finalize(

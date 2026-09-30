@@ -106,6 +106,7 @@ def test_detection_builder_round_trips_through_native_data_designer_config(tmp_p
     )
     assert seed_validation_transform.excluded_entity_labels == ["email"]
     assert merge_transform.excluded_entity_labels == ["email"]
+    assert merge_transform.allowed_entity_labels == ["first_name"]
     assert finalize_transform.excluded_entity_labels == ["email"]
     assert finalize_transform.allowed_entity_labels == ["first_name"]
 

@@ -121,6 +121,10 @@ Rules:
 3. Entities with protection_method_suggestion="leave_as_is" should be retained verbatim (tags removed only).
 4. The rewritten text must flow naturally and preserve the meaning and narrative structure of the original.
 5. Do not introduce new identifying details not present in the original.
+6. When generalizing a value inside a noun phrase (e.g. an exact age), restructure the whole noun phrase
+   so articles, word order, and agreement stay grammatical.
+   GOOD: "a 37-year-old astronomer" -> "an astronomer in his late 30s"
+   BAD: "a in his late 30s astronomer"
 </output_requirements>"""
     return substitute_placeholders(
         prompt,

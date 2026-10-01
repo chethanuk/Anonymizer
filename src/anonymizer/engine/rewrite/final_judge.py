@@ -108,6 +108,8 @@ Score each dimension independently.
     - Reward rewrites that sound natural and internally consistent.
     - Penalize awkward phrasing, repetitive wording, broken grammar, incoherence, unnatural
       insertions, placeholder-like language, or text that feels machine-generated.
+    - Malformed phrases left by substituting or generalizing a value (a wrong article, a stranded
+      modifier such as "a in his late 30s astronomer") are broken grammar; score `low`.
     - Judge style independently from privacy and quality. A rewrite can be natural even if it
       changes content, and it can preserve content while still sounding awkward.
     - Score as:

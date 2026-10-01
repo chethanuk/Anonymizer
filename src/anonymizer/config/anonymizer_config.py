@@ -116,6 +116,13 @@ class Detect(BaseModel):
             "are dispatched (round-robin) across the validator pool."
         ),
     )
+    validator_system_prompt: str | None = Field(
+        default=None,
+        description=(
+            "System prompt sent with every validator LLM call. None uses the built-in default "
+            "(role framing plus a prompt-injection guardrail). Used verbatim; blank strings are rejected."
+        ),
+    )
     validation_excerpt_window_chars: int = Field(
         default=500,
         gt=0,
@@ -125,6 +132,13 @@ class Detect(BaseModel):
             "validator sees per chunk; it is NOT the LLM's context window limit."
         ),
     )
+
+    @field_validator("validator_system_prompt")
+    @classmethod
+    def _reject_blank_validator_system_prompt(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("validator_system_prompt must not be blank; use None for the built-in default")
+        return value
 
     @field_validator("entity_labels")
     @classmethod

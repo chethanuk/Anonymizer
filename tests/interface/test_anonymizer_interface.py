@@ -1178,3 +1178,24 @@ def test_evaluate_passes_detection_context_to_coverage_judge(stub_input: Anonymi
     assert mock_coverage_wf.call_args.kwargs["excluded_entity_labels"] == ["email"]
     assert evaluated.data_summary == "Customer support transcripts."
     assert evaluated.excluded_entity_labels == ["email"]
+
+
+@pytest.mark.parametrize("prompt", [None, "ZZ-SENTINEL-127"], ids=["default", "custom"])
+def test_validator_system_prompt_reaches_detection_workflow(
+    stub_input: AnonymizerInput,
+    tmp_path: Path,
+    prompt: str | None,
+) -> None:
+    config = AnonymizerConfig(detect={"validator_system_prompt": prompt}, replace=Redact())
+    anonymizer, detection_wf, _, _ = _make_anonymizer()
+    detection_wf.build_detection_config.return_value = Mock()
+    detection_wf.build_detection_builder_for_seed.return_value = Mock()
+    seed_path = tmp_path / "seed.parquet"
+
+    anonymizer.preview(config=config, data=stub_input, num_records=1)
+    anonymizer.export_detection_config(config=config, data=stub_input, seed_path=seed_path)
+    anonymizer.export_detection_builder_for_seed(config=config, seed_path=seed_path)
+
+    assert detection_wf.run.call_args.kwargs["validator_system_prompt"] == prompt
+    assert detection_wf.build_detection_config.call_args.kwargs["validator_system_prompt"] == prompt
+    assert detection_wf.build_detection_builder_for_seed.call_args.kwargs["validator_system_prompt"] == prompt

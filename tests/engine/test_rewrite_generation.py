@@ -587,6 +587,22 @@ def test_get_rewrite_prompt_references_required_columns(privacy_goal: PrivacyGoa
     assert _jinja(COL_REPLACEMENT_MAP_FOR_PROMPT) in prompt
 
 
+@pytest.mark.parametrize("data_summary", [None, "Biographical profiles"], ids=["no-summary", "with-summary"])
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        pytest.param("restructure the whole noun phrase", id="restructure-rule"),
+        pytest.param('"a 37-year-old astronomer" -> "an astronomer in his late 30s"', id="good-example"),
+        pytest.param('"a in his late 30s astronomer"', id="bad-example"),
+    ],
+)
+def test_rewrite_prompt_teaches_noun_phrase_restructuring(
+    privacy_goal: PrivacyGoal, data_summary: str | None, snippet: str
+) -> None:
+    prompt = " ".join(_get_rewrite_prompt(privacy_goal, data_summary=data_summary).split())
+    assert snippet in prompt
+
+
 # ---------------------------------------------------------------------------
 # Tests: RewriteGenerationWorkflow.columns()
 # ---------------------------------------------------------------------------

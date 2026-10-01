@@ -285,6 +285,24 @@ def test_detect_chunked_validation_accepts_overrides() -> None:
     assert config.detect.validation_excerpt_window_chars == 1000
 
 
+@pytest.mark.parametrize(
+    ("value", "valid"),
+    [
+        pytest.param(None, True, id="none-means-default"),
+        pytest.param("ZZ-SENTINEL-127", True, id="custom"),
+        pytest.param("", False, id="empty"),
+        pytest.param("   ", False, id="whitespace-only"),
+    ],
+)
+def test_detect_validator_system_prompt_validation(value: str | None, valid: bool) -> None:
+    if not valid:
+        with pytest.raises(ValidationError):
+            AnonymizerConfig(detect={"validator_system_prompt": value}, replace=Redact())
+        return
+    config = AnonymizerConfig(detect={"validator_system_prompt": value}, replace=Redact())
+    assert config.detect.validator_system_prompt == value
+
+
 def test_detect_validation_max_entities_per_call_must_be_positive() -> None:
     with pytest.raises(ValidationError):
         AnonymizerConfig(detect={"validation_max_entities_per_call": 0}, replace=Redact())

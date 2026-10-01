@@ -1093,6 +1093,54 @@ def test_validator_pool_kwargs_thread_through_to_plugin_config(
     assert config.excerpt_window_chars == 42
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        pytest.param({}, None, id="omitted"),
+        pytest.param({"validator_system_prompt": None}, None, id="explicit-none"),
+        pytest.param({"validator_system_prompt": "ZZ-SENTINEL-127"}, "ZZ-SENTINEL-127", id="custom-sentinel"),
+        pytest.param(
+            {"validator_system_prompt": "keep <<X>> and {{ x }}"},
+            "keep <<X>> and {{ x }}",
+            id="verbatim-markup",
+        ),
+    ],
+)
+def test_validator_system_prompt_reaches_validation_config(
+    stub_detector_model_configs: list[ModelConfig],
+    stub_detection_model_selection: DetectionModelSelection,
+    kwargs: dict,
+    expected: str | None,
+) -> None:
+    """``None``/omitted resolves to the guarded default; a custom prompt is passed verbatim."""
+    adapter = Mock()
+    adapter.run_workflow.return_value = WorkflowRunResult(
+        dataframe=pd.DataFrame(
+            {
+                COL_TEXT: ["Alice"],
+                COL_DETECTED_ENTITIES: [{"entities": [{"value": "Alice", "label": "first_name"}]}],
+            }
+        ),
+        failed_records=[],
+    )
+    EntityDetectionWorkflow(adapter=adapter).run(
+        pd.DataFrame({COL_TEXT: ["Alice"]}),
+        model_configs=stub_detector_model_configs,
+        selected_models=stub_detection_model_selection,
+        gliner_detection_threshold=0.5,
+        tag_latent_entities=False,
+        **kwargs,
+    )
+    config = _find_column(adapter.run_workflow.call_args.kwargs["columns"], COL_VALIDATION_DECISIONS)
+    if expected is None:
+        from anonymizer.engine.detection.detection_workflow import DEFAULT_VALIDATOR_SYSTEM_PROMPT
+
+        assert config.system_prompt == DEFAULT_VALIDATOR_SYSTEM_PROMPT
+        assert "untrusted data" in DEFAULT_VALIDATOR_SYSTEM_PROMPT
+    else:
+        assert config.system_prompt == expected
+
+
 def test_validation_single_chunk_full_text_threads_to_config(
     stub_detector_model_configs: list[ModelConfig],
     stub_detection_model_selection: DetectionModelSelection,

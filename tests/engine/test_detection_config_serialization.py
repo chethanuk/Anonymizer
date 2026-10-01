@@ -45,6 +45,33 @@ def test_detection_plugin_satisfies_data_designer_contract(plugin: Plugin) -> No
     assert_valid_plugin(plugin)
 
 
+@pytest.mark.parametrize("prompt", ["ZZ-SENTINEL-127", None], ids=["custom", "default"])
+def test_validator_system_prompt_survives_data_designer_round_trip(tmp_path: Path, prompt: str | None) -> None:
+    seed_path = tmp_path / "seed.parquet"
+    pd.DataFrame({COL_TEXT: ["Alice"]}).to_parquet(seed_path, index=False)
+    parsed_models = parse_model_configs(None)
+    workflow = EntityDetectionWorkflow(adapter=NddAdapter(data_designer=cast(DataDesigner, Mock())))
+    builder = workflow.build_detection_builder_for_seed(
+        seed_path=seed_path,
+        model_configs=parsed_models.model_configs,
+        selected_models=parsed_models.selected_models.detection,
+        gliner_detection_threshold=0.3,
+        validator_system_prompt=prompt,
+    )
+
+    payload = builder.get_builder_config().to_json()
+    assert payload is not None
+    restored = DataDesignerConfigBuilder.from_config(payload)
+
+    validation = next(c for c in restored.get_column_configs() if c.name == COL_VALIDATION_DECISIONS)
+    assert isinstance(validation, ChunkedValidationConfig)
+    if prompt is None:
+        assert validation.system_prompt is not None
+        assert "untrusted data" in validation.system_prompt
+    else:
+        assert validation.system_prompt == prompt
+
+
 def test_detection_builder_round_trips_through_native_data_designer_config(tmp_path: Path) -> None:
     seed_path = tmp_path / "seed.parquet"
     pd.DataFrame({COL_TEXT: ["Alice", "Bob", "Carol"]}).to_parquet(seed_path, index=False)

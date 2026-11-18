@@ -62,6 +62,9 @@ uv run anonymizer preview --source $DATA_URL --text-column biography --replace r
 # Full run with output file
 uv run anonymizer run --source $DATA_URL --text-column biography --replace redact --output result.csv
 
+# Also save the trace dataset and any failed records for triage
+uv run anonymizer run --source $DATA_URL --text-column biography --replace redact --output result.csv --trace trace.parquet --failed-output failed.csv
+
 # Validate config without running
 uv run anonymizer validate --source $DATA_URL --text-column biography --replace hash
 ```

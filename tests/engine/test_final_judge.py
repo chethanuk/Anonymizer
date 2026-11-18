@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import pytest
 from data_designer.config.column_configs import LLMJudgeColumnConfig
 
 from anonymizer.config.models import EvaluateModelSelection
@@ -130,3 +131,17 @@ def test_judge_prompt_references_categorical_scale() -> None:
     assert "high" in prompt
     assert "medium" in prompt
     assert "low" in prompt
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        pytest.param("wrong article", id="grammar-rule"),
+        pytest.param("stranded modifier", id="stranded-modifier"),
+        pytest.param('"a in his late 30s astronomer"', id="bad-example"),
+        pytest.param("score `low`", id="low-score"),
+    ],
+)
+def test_judge_prompt_penalizes_ungrammatical_generalized_phrases(snippet: str) -> None:
+    prompt = " ".join(_judge_prompt(_STUB_PRIVACY_GOAL).split())
+    assert snippet in prompt

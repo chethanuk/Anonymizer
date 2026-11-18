@@ -56,6 +56,8 @@ from anonymizer.config.replace_strategies import Annotate, Hash, Redact, Substit
 from anonymizer.config.rewrite import DEFAULT_PRESERVE_TEXT, DEFAULT_PROTECT_TEXT, PrivacyGoal, RiskTolerance
 from anonymizer.engine.constants import DEFAULT_ENTITY_LABELS
 from anonymizer.engine.io.constants import SUPPORTED_IO_FORMATS
+from anonymizer.engine.io.reader import read_json_table
+from anonymizer.engine.io.writer import write_output
 from anonymizer.engine.ndd.model_loader import parse_model_configs, validate_model_alias_references
 from anonymizer.interface.anonymizer import Anonymizer
 from anonymizer.measurement import (
@@ -439,6 +441,13 @@ def _input_columns(source: str) -> set[str] | None:
         return None
     if suffix == ".csv":
         return set(pd.read_csv(source, nrows=0).columns)
+    if suffix == ".json":
+        return set(read_json_table(source, lines=False).columns)
+    if suffix == ".jsonl":
+        # Whole file, not nrows=1: records may be ragged, and a column that first appears
+        # in a later record would otherwise be reported missing.  csv reads a full header
+        # and parquet a full schema, so this is what it costs to match them.
+        return set(read_json_table(source, lines=True).columns)
     return set(pq.ParquetFile(source).schema_arrow.names)
 
 
@@ -918,6 +927,10 @@ def _read_local_input_dataframe(source: Path, *, suffix: str) -> pd.DataFrame:
         return pd.read_csv(source)
     if suffix == ".parquet":
         return pd.read_parquet(source)
+    if suffix == ".json":
+        return read_json_table(source, lines=False)
+    if suffix == ".jsonl":
+        return read_json_table(source, lines=True)
     supported_formats = " or ".join(SUPPORTED_IO_FORMATS)
     raise ValueError(f"Unsupported input format: {suffix}. Use {supported_formats}.")
 
@@ -928,6 +941,9 @@ def _write_local_input_dataframe(dataframe: pd.DataFrame, destination: Path, *, 
         return
     if suffix == ".parquet":
         dataframe.to_parquet(destination, index=False)
+        return
+    if suffix in (".json", ".jsonl"):
+        write_output(dataframe, destination)
         return
     supported_formats = " or ".join(SUPPORTED_IO_FORMATS)
     raise ValueError(f"Unsupported input format: {suffix}. Use {supported_formats}.")
